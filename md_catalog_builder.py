@@ -209,15 +209,23 @@ class OllamaFallbackRouter:
             json.dump(self.catalog, f, ensure_ascii=False, indent=2)
 
     def _extract_json(self, text: str) -> dict:
-        """CoT 태그 제거 및 JSON 블록 추출"""
-        clean_text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+        """CoT, 마크다운 제거 후 JSON 추출. 실패 시 Raw 텍스트 로깅"""
+        # 1. <think> 태그 및 마크다운 코드 블록 찌꺼기 제거
+        clean_text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+        clean_text = re.sub(r'```json|```', '', clean_text).strip()
+        
         match = re.search(r'\{.*\}', clean_text, re.DOTALL)
         
         if match:
+            json_str = match.group(0)
             try:
-                return json.loads(match.group(0))
-            except json.JSONDecodeError:
-                logger.error("JSON decode 에러 발생")
+                return json.loads(json_str)
+            except json.JSONDecodeError as e:
+                # 에러 발생 시 원본 텍스트 일부를 찍어서 원인 파악
+                logger.error(f"JSON decode 에러: {e} | Raw: {json_str[:150]}")
+        else:
+            logger.error(f"JSON 패턴 매칭 실패 | Raw: {clean_text[:150]}")
+            
         return {}
 
     def _call_ollama(self, prompt: str) -> str:
@@ -225,6 +233,7 @@ class OllamaFallbackRouter:
             "model": self.model_id,
             "prompt": prompt,
             "stream": False,
+            "format": "json",
             "options": {
                 "temperature": 0.1,
                 "num_ctx": 2048
@@ -235,7 +244,7 @@ class OllamaFallbackRouter:
             res.raise_for_status()
             return res.json().get("response", "")
         except requests.exceptions.RequestException as e:
-            logger.error(f"Ollama API 호출 실패: {e}")
+            logger.error(f"Ollama API Error: {e}")
             return ""
 
     def run(self):
