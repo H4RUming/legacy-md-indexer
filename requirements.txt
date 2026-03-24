@@ -1,12 +1,8 @@
-# 전처리
 docling>=2.0.0
 docling-core>=1.0.0
 easyocr
-
-# 유틸리티
-python-dotenv  # 환경 변수
-tqdm           # 진행 바
-pathlib        # 경로 관리
-
-# 시각화
-pandas         # 데이터 구조화
+python-dotenv
+tqdm
+pathlib
+pandas
+gradio

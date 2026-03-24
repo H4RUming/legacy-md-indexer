@@ -281,7 +281,7 @@ class OllamaFallbackRouter:
                     "source": "Track2_Ollama"
                 })
                 # 진행률 바와 겹치지 않게 로그 출력을 제어하려면 logger.info 대신 tqdm.write 사용 권장
-                # 여기서는 콘솔 출력의 깔끔함을 위해 성공 로그는 생략하거나 주석 처리합니다.
+                # 여기서는 콘솔 출력의 깔끔함을 위해 성공 로그는 생략하거나 주석 처리함.
                 # tqdm.write(f"[INFO] Ollama parsing 성공: {key} ({time.time() - start_t:.2f}s)")
             else:
                 self.catalog[key]["status"] = "FAILED"
