@@ -195,7 +195,7 @@ class OllamaFallbackRouter:
         # 설정 로드
         config = configparser.ConfigParser()
         config.read('setting.conf')
-        self.model_id = config['DEFAULT'].get('MODEL_ID', 'qwen2.5:14b')
+        self.model_id = config['DEFAULT'].get('MODEL_ID', 'nemotron-3-super')
         self.api_url = config['DEFAULT'].get('OLLAMA_URL', 'http://localhost:11434/api/generate')
 
     def _load_catalog(self) -> dict:
