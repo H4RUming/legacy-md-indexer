@@ -91,7 +91,7 @@ def build_gradio_ui():
             with gr.Column(scale=3):
                 gr.Markdown("### 시스템 아키텍처 상태")
                 with gr.Group():
-                    gr.Textbox(value="qwen2.5:14b (Local Ollama)", label="추론 엔진", interactive=False)
+                    gr.Textbox(value="nemotron-cascade-2 (Local Ollama)", label="추론 엔진", interactive=False)
                     gr.Textbox(value="Agentic Router + MD RAG", label="검색 아키텍처", interactive=False)
                 
                 gr.Markdown("### Optimized Query Process")
