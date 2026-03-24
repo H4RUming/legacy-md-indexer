@@ -10,7 +10,7 @@ ch = logging.StreamHandler()
 ch.setFormatter(logging.Formatter('[%(levelname)s] %(asctime)s - %(message)s', '%H:%M:%S'))
 logger.addHandler(ch)
 
-# 로컬 폰트(NanumGothic) 및 커스텀 UI 디자인 적용
+# 로컬 폰트(NanumGothic) 및 커스텀 UI 디자인 적용 (HTML 주입용)
 custom_css = """
 @font-face {
     font-family: 'NanumGothic';
@@ -59,13 +59,22 @@ def build_gradio_ui():
         ["COSCO Shipping 업무협의 내용"]
     ]
 
-    with gr.Blocks(css=custom_css) as demo:
-        gr.HTML("""<div class="header-banner"><h1>LLM-Based Hierarchical Document Intelligence Engine</h1><p>현재 프로토타입 버전으로, 불안정하거나 간혹 잘못된 정보를 제공할 수 있습니다.</p></div>""")
+    # Warning 방지를 위해 Blocks의 css 파라미터 제거
+    with gr.Blocks() as demo:
+        # CSS를 HTML 내부에 직접 주입하여 안정성 확보
+        gr.HTML(f"""
+        <style>{custom_css}</style>
+        <div class="header-banner">
+            <h1>LLM-Based Hierarchical Document Intelligence Engine</h1>
+            <p>현재 프로토타입 버전으로, 불안정하거나 간혹 잘못된 정보를 제공할 수 있습니다.</p>
+        </div>
+        """)
         
         with gr.Row():
             # 왼쪽: 챗봇 UI
             with gr.Column(scale=7):
-                chatbot = gr.Chatbot(height=600, show_label=False, type="messages")
+                # TypeError 방지를 위해 type="messages" 제거
+                chatbot = gr.Chatbot(height=600, show_label=False)
                 with gr.Row():
                     msg_input = gr.Textbox(
                         show_label=False, 
@@ -97,16 +106,17 @@ def build_gradio_ui():
                 gr.Markdown("### 참조 문서 데이터 원천 (Sources)")
                 source_display = gr.HTML(value="<div class='source-panel' style='color: #64748b; text-align: center; padding-top: 30px;'>질의 실행 시 참조된 원본 문서 경로가 표출됩니다.</div>")
 
+        # 튜플 리스트 방식 [[user, bot]]으로 상태 관리 변경
         def user_interaction(user_message, history):
             history = history or []
-            history.append({"role": "user", "content": user_message})
+            history.append([user_message, None])
             return "", history
 
         def bot_interaction(history):
             if not history: 
                 return history, "", {}
             
-            raw_user_message = history[-1]["content"]
+            raw_user_message = history[-1][0]
             answer, sources, params = engine.execute_query(raw_user_message)
             
             source_html = "<div class='source-panel'>"
@@ -117,7 +127,7 @@ def build_gradio_ui():
                 source_html += "<div style='color: #64748b; text-align: center; padding: 20px;'>참조된 문서 데이터가 존재하지 않습니다.</div>"
             source_html += "</div>"
             
-            history.append({"role": "assistant", "content": answer})
+            history[-1][1] = answer
             return history, source_html, params
 
         # 이벤트 체인
