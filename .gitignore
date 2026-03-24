@@ -1,3 +1,5 @@
 /.venv
 /processed_md
 file_catalog.json
+/__pycache__
+/.gradio
