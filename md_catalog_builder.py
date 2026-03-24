@@ -254,9 +254,9 @@ class OllamaFallbackRouter:
                 logger.warning(f"Target 파일 누락: {key}")
                 continue
 
-            # Context 제한 (Max 1500 chars)
+            # Context 제한 (Max 3000 chars)
             raw_text = fpath.read_text(encoding='utf-8')
-            trunc_text = raw_text[:1500]
+            trunc_text = raw_text[:3000]
 
             prompt = f"""다음 문서의 내용을 파악하여 doc_type, year, month를 추출하라.
 알 수 없는 항목은 null로 처리할 것.
@@ -297,10 +297,10 @@ if __name__ == "__main__":
     target = "./processed_md"
     catalog_out = "./file_catalog.json"
     
-    # 1. Regex Fast-track 실행
+    # Regex Fast-track 실행
     builder = CatalogBuilder(target_dir=target, output_json=catalog_out)
     builder.run_pipeline()
     
-    # 2. Track 1 종료 후, 실패 건들에 대해 Ollama Fallback 실행
+    # Track 1 종료 후, 실패 건들에 대해 Ollama Fallback 실행
     ollama_router = OllamaFallbackRouter(catalog_path=catalog_out, target_dir=target)
     ollama_router.run()
