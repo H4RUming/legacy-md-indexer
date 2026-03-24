@@ -176,6 +176,131 @@ class CatalogBuilder:
         logger.info(f"Track 1 파이프라인 종료. (Elapsed: {elapsed:.2f}s)")
         logger.info(f"Result - Track1 Hit: {track1_hit}, Track2 Queue: {track2_route}, Skips: {skip_cnt}")
 
+import requests
+import configparser
+
+logger = logging.getLogger("TRACK2_OLLAMA")
+logger.setLevel(logging.INFO)
+ch = logging.StreamHandler()
+ch.setFormatter(logging.Formatter('[%(levelname)s] %(asctime)s - %(message)s', '%H:%M:%S'))
+logger.addHandler(ch)
+
+class OllamaFallbackRouter:
+    """Track 2: PENDING_LLM 대상 로컬 Ollama Zero-shot 분류기"""
+    def __init__(self, catalog_path: str, target_dir: str):
+        self.catalog_path = Path(catalog_path)
+        self.target_dir = Path(target_dir)
+        self.catalog = self._load_catalog()
+        
+        # 설정 로드
+        config = configparser.ConfigParser()
+        config.read('setting.conf')
+        self.model_id = config['DEFAULT'].get('MODEL_ID', 'qwen2.5:14b')
+        self.api_url = config['DEFAULT'].get('OLLAMA_URL', 'http://localhost:11434/api/generate')
+
+    def _load_catalog(self) -> dict:
+        if self.catalog_path.exists():
+            with open(self.catalog_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        raise FileNotFoundError("catalog 파일 누락. Track 1 선행 필요")
+
+    def _dump_catalog(self):
+        with open(self.catalog_path, 'w', encoding='utf-8') as f:
+            json.dump(self.catalog, f, ensure_ascii=False, indent=2)
+
+    def _extract_json(self, text: str) -> dict:
+        """CoT 태그 제거 및 JSON 블록 추출"""
+        clean_text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+        match = re.search(r'\{.*\}', clean_text, re.DOTALL)
+        
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                logger.error("JSON decode 에러 발생")
+        return {}
+
+    def _call_ollama(self, prompt: str) -> str:
+        payload = {
+            "model": self.model_id,
+            "prompt": prompt,
+            "stream": False,
+            "options": {
+                "temperature": 0.1,
+                "num_ctx": 2048
+            }
+        }
+        try:
+            res = requests.post(self.api_url, json=payload, timeout=120)
+            res.raise_for_status()
+            return res.json().get("response", "")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Ollama API 호출 실패: {e}")
+            return ""
+
+    def run(self):
+        pending_keys = [k for k, v in self.catalog.items() if v.get("status") == "PENDING_LLM"]
+        if not pending_keys:
+            logger.info("PENDING_LLM task 없음. 종료.")
+            return
+
+        logger.info(f"Ollama Fallback 시작: Total {len(pending_keys)}ea (Model: {self.model_id})")
+
+        for key in pending_keys:
+            start_t = time.time()
+            fpath = self.target_dir / key
+            
+            if not fpath.exists():
+                logger.warning(f"Target 파일 누락: {key}")
+                continue
+
+            # Context 제한 (Max 1500 chars)
+            raw_text = fpath.read_text(encoding='utf-8')
+            trunc_text = raw_text[:1500]
+
+            prompt = f"""다음 문서의 내용을 파악하여 doc_type, year, month를 추출하라.
+알 수 없는 항목은 null로 처리할 것.
+반드시 아래 JSON 포맷으로만 응답하라. 설명은 생략한다.
+
+[포맷]
+{{"doc_type": "string", "year": "int", "month": "int"}}
+
+[문서내용]
+{trunc_text}"""
+
+            res_text = self._call_ollama(prompt)
+            if not res_text:
+                self.catalog[key]["status"] = "ERROR"
+                self._dump_catalog()
+                continue
+
+            parsed_data = self._extract_json(res_text)
+            
+            if parsed_data:
+                self.catalog[key].update({
+                    "status": "COMPLETED",
+                    "doc_type": parsed_data.get("doc_type"),
+                    "year": parsed_data.get("year"),
+                    "month": parsed_data.get("month"),
+                    "source": "Track2_Ollama"
+                })
+                elapsed = time.time() - start_t
+                logger.info(f"Ollama parsing 성공: {key} ({elapsed:.2f}s)")
+            else:
+                self.catalog[key]["status"] = "FAILED"
+                logger.error(f"데이터 추출 실패: {key}")
+
+            # 파일 단위 상태 저장
+            self._dump_catalog()
+
 if __name__ == "__main__":
-    builder = CatalogBuilder(target_dir="./processed_md", output_json="./file_catalog.json")
+    target = "./processed_md"
+    catalog_out = "./file_catalog.json"
+    
+    # 1. Regex Fast-track 실행
+    builder = CatalogBuilder(target_dir=target, output_json=catalog_out)
     builder.run_pipeline()
+    
+    # 2. Track 1 종료 후, 실패 건들에 대해 Ollama Fallback 실행
+    ollama_router = OllamaFallbackRouter(catalog_path=catalog_out, target_dir=target)
+    ollama_router.run()
