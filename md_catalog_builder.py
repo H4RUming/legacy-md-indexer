@@ -1,10 +1,10 @@
 """
 Project: Data RAG System
-Module: MD Catalog Builder (Track 1 & Sanitizer)
+Module: MD Catalog Builder (Track 1 & Sanitizer & Track 2 Ollama)
 Description: 
     - processed_md 파일 대상 정제 및 메타데이터 1차 추출
     - Crash-safe JSON Dump (단일 파일 처리 단위)
-    - Track 1 실패 시 PENDING_LLM 상태로 마킹하여 Track 2 큐로 라우팅
+    - Track 1 실패 시 PENDING_LLM 상태로 마킹하여 Track 2(Ollama) 큐로 라우팅
 """
 
 import os
@@ -12,8 +12,11 @@ import json
 import re
 import time
 import logging
+import requests
+import configparser
 from pathlib import Path
 from typing import Dict, Tuple, Optional
+from tqdm import tqdm
 
 # 로거 셋업
 logger = logging.getLogger("CATALOG_BUILDER")
@@ -23,17 +26,19 @@ ch = logging.StreamHandler()
 ch.setFormatter(fmt)
 logger.addHandler(ch)
 
+# Track 2 전용 로거
+logger_t2 = logging.getLogger("TRACK2_OLLAMA")
+logger_t2.setLevel(logging.INFO)
+ch2 = logging.StreamHandler()
+ch2.setFormatter(logging.Formatter('[%(levelname)s] %(asctime)s - %(message)s', '%H:%M:%S'))
+logger_t2.addHandler(ch2)
+
 def sanitize_md_for_rag(text: str) -> str:
-    """RAG 청킹 최적화를 위한 노이즈 정제 (표, 헤더 마크다운 구조 보존)"""
-    # HTML 주석 등 미디어 태그 제거
+    """RAG 청킹 최적화를 위한 노이즈 정제"""
     text = re.sub(r'', '', text)
-    # 특수문자 노이즈 제거 (마크다운 제어문자 보존)
     text = re.sub(r'[^\w\s\n\.,!\?\-\|#\(\)\[\]<>\'":;/%&~+*=]', '', text)
-    # 연속 공백 및 탭 정규화
     text = re.sub(r'[ \t]+', ' ', text)
-    # 3연속 이상 줄바꿈 압축
     text = re.sub(r'\n{3,}', '\n\n', text)
-    
     return text.strip()
 
 class RegexFastTrack:
@@ -64,13 +69,11 @@ class RegexFastTrack:
     def _extract_date(self, file_path: Path, content_head: str) -> Tuple[Optional[int], Optional[int]]:
         year, month = None, None
         
-        # 본문 상단 헤더 데이터 최우선 파싱
         if content_head:
             match = self.content_date_pattern.search(content_head)
             if match:
                 return int(match.group(1)), int(match.group(2))
 
-        # Path 역순 탐색 파싱
         for part in file_path.parts[::-1]:
             clean_part = part.replace(' ', '')
             if not year:
@@ -94,6 +97,7 @@ class RegexFastTrack:
         return None
 
 class CatalogBuilder:
+    """Track 1 메인 로직"""
     def __init__(self, target_dir: str, output_json: str):
         self.target_dir = Path(target_dir)
         self.output_json = Path(output_json)
@@ -101,7 +105,6 @@ class CatalogBuilder:
         self.catalog = self._load_existing_catalog()
 
     def _load_existing_catalog(self) -> dict:
-        """Crash-safe 지원을 위한 카탈로그 로드"""
         if self.output_json.exists():
             try:
                 with open(self.output_json, 'r', encoding='utf-8') as f:
@@ -111,7 +114,6 @@ class CatalogBuilder:
         return {}
 
     def _dump_catalog(self):
-        """단일 파일 처리 직후 상태 기록"""
         with open(self.output_json, 'w', encoding='utf-8') as f:
             json.dump(self.catalog, f, ensure_ascii=False, indent=2)
 
@@ -131,14 +133,12 @@ class CatalogBuilder:
         for fpath in md_files:
             file_key = str(fpath.relative_to(self.target_dir))
             
-            # 이어하기 방어 (성공건 및 LLM 대기건 스킵)
             if file_key in self.catalog:
                 status = self.catalog[file_key].get("status")
                 if status in ["COMPLETED", "PENDING_LLM"]:
                     skip_cnt += 1
                     continue
 
-            # 파일 Read & Sanitize
             try:
                 raw_text = fpath.read_text(encoding='utf-8')
                 clean_text = sanitize_md_for_rag(raw_text)
@@ -146,10 +146,7 @@ class CatalogBuilder:
                 logger.error(f"파일 Read 에러 [{fpath.name}]: {e}")
                 continue
 
-            # 본문 헤더 500자 슬라이싱 (Track 1 리소스 절약)
             content_head = clean_text[:500]
-            
-            # Track 1 라우팅
             meta = self.fast_track.process(fpath, content_head)
             
             if meta.pop("is_complete"):
@@ -162,7 +159,6 @@ class CatalogBuilder:
                 }
                 track1_hit += 1
             else:
-                # Track 1 실패, Track 2 (LLM Fallback) 대기 상태로 마킹
                 self.catalog[file_key] = {
                     "status": "PENDING_LLM",
                     "partial_meta": meta,
@@ -176,14 +172,6 @@ class CatalogBuilder:
         logger.info(f"Track 1 파이프라인 종료. (Elapsed: {elapsed:.2f}s)")
         logger.info(f"Result - Track1 Hit: {track1_hit}, Track2 Queue: {track2_route}, Skips: {skip_cnt}")
 
-import requests
-import configparser
-
-logger = logging.getLogger("TRACK2_OLLAMA")
-logger.setLevel(logging.INFO)
-ch = logging.StreamHandler()
-ch.setFormatter(logging.Formatter('[%(levelname)s] %(asctime)s - %(message)s', '%H:%M:%S'))
-logger.addHandler(ch)
 
 class OllamaFallbackRouter:
     """Track 2: PENDING_LLM 대상 로컬 Ollama Zero-shot 분류기"""
@@ -192,7 +180,6 @@ class OllamaFallbackRouter:
         self.target_dir = Path(target_dir)
         self.catalog = self._load_catalog()
         
-        # 설정 로드
         config = configparser.ConfigParser()
         config.read('setting.conf')
         self.model_id = config['DEFAULT'].get('MODEL_ID', 'nemotron-3-super')
@@ -209,22 +196,18 @@ class OllamaFallbackRouter:
             json.dump(self.catalog, f, ensure_ascii=False, indent=2)
 
     def _extract_json(self, text: str) -> dict:
-        """CoT, 마크다운 제거 후 JSON 추출. 실패 시 Raw 텍스트 로깅"""
-        # 1. <think> 태그 및 마크다운 코드 블록 찌꺼기 제거
         clean_text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
         clean_text = re.sub(r'```json|```', '', clean_text).strip()
         
         match = re.search(r'\{.*\}', clean_text, re.DOTALL)
-        
         if match:
             json_str = match.group(0)
             try:
                 return json.loads(json_str)
             except json.JSONDecodeError as e:
-                # 에러 발생 시 원본 텍스트 일부를 찍어서 원인 파악
-                logger.error(f"JSON decode 에러: {e} | Raw: {json_str[:150]}")
+                logger_t2.error(f"JSON decode 에러: {e} | Raw: {json_str[:150]}")
         else:
-            logger.error(f"JSON 패턴 매칭 실패 | Raw: {clean_text[:150]}")
+            logger_t2.error(f"JSON 패턴 매칭 실패 | Raw: {clean_text[:150]}")
             
         return {}
 
@@ -244,28 +227,32 @@ class OllamaFallbackRouter:
             res.raise_for_status()
             return res.json().get("response", "")
         except requests.exceptions.RequestException as e:
-            logger.error(f"Ollama API Error: {e}")
+            logger_t2.error(f"Ollama API Error: {e}")
             return ""
 
     def run(self):
         pending_keys = [k for k, v in self.catalog.items() if v.get("status") == "PENDING_LLM"]
         if not pending_keys:
-            logger.info("PENDING_LLM task 없음. 종료.")
+            logger_t2.info("PENDING_LLM task 없음. 종료.")
             return
 
-        logger.info(f"Ollama Fallback 시작: Total {len(pending_keys)}ea (Model: {self.model_id})")
+        logger_t2.info(f"Ollama Fallback 시작: Total {len(pending_keys)}ea (Model: {self.model_id})")
 
-        for key in pending_keys:
+        # tqdm 적용: 진행률과 예상 시간(ETA) 표기
+        for key in tqdm(pending_keys, desc="Ollama Inference", unit="file"):
             start_t = time.time()
             fpath = self.target_dir / key
             
             if not fpath.exists():
-                logger.warning(f"Target 파일 누락: {key}")
+                logger_t2.warning(f"Target 파일 누락: {key}")
                 continue
 
-            # Context 제한 (Max 3000 chars)
-            raw_text = fpath.read_text(encoding='utf-8')
-            trunc_text = raw_text[:3000]
+            try:
+                raw_text = fpath.read_text(encoding='utf-8')
+                trunc_text = raw_text[:3000]
+            except Exception as e:
+                logger_t2.error(f"파일 읽기 실패 [{key}]: {e}")
+                continue
 
             prompt = f"""다음 문서의 내용을 파악하여 doc_type, year, month를 추출하라.
 알 수 없는 항목은 null로 처리할 것.
@@ -293,23 +280,23 @@ class OllamaFallbackRouter:
                     "month": parsed_data.get("month"),
                     "source": "Track2_Ollama"
                 })
-                elapsed = time.time() - start_t
-                logger.info(f"Ollama parsing 성공: {key} ({elapsed:.2f}s)")
+                # 진행률 바와 겹치지 않게 로그 출력을 제어하려면 logger.info 대신 tqdm.write 사용 권장
+                # 여기서는 콘솔 출력의 깔끔함을 위해 성공 로그는 생략하거나 주석 처리합니다.
+                # tqdm.write(f"[INFO] Ollama parsing 성공: {key} ({time.time() - start_t:.2f}s)")
             else:
                 self.catalog[key]["status"] = "FAILED"
-                logger.error(f"데이터 추출 실패: {key}")
+                logger_t2.error(f"데이터 추출 실패: {key}")
 
-            # 파일 단위 상태 저장
             self._dump_catalog()
 
 if __name__ == "__main__":
     target = "./processed_md"
     catalog_out = "./file_catalog.json"
     
-    # Regex Fast-track 실행
+    # 1. Regex Fast-track 실행
     builder = CatalogBuilder(target_dir=target, output_json=catalog_out)
     builder.run_pipeline()
     
-    # Track 1 종료 후, 실패 건들에 대해 Ollama Fallback 실행
+    # 2. Track 1 종료 후, 실패 건들에 대해 Ollama Fallback 실행
     ollama_router = OllamaFallbackRouter(catalog_path=catalog_out, target_dir=target)
     ollama_router.run()
