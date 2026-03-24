@@ -10,7 +10,7 @@ ch = logging.StreamHandler()
 ch.setFormatter(logging.Formatter('[%(levelname)s] %(asctime)s - %(message)s', '%H:%M:%S'))
 logger.addHandler(ch)
 
-# 로컬 폰트(NanumGothic) 및 커스텀 UI 디자인 적용 (HTML 주입용)
+# 로컬 폰트 및 커스텀 UI CSS
 custom_css = """
 @font-face {
     font-family: 'NanumGothic';
@@ -59,9 +59,7 @@ def build_gradio_ui():
         ["COSCO Shipping 업무협의 내용"]
     ]
 
-    # Warning 방지를 위해 Blocks의 css 파라미터 제거
     with gr.Blocks() as demo:
-        # CSS를 HTML 내부에 직접 주입하여 안정성 확보
         gr.HTML(f"""
         <style>{custom_css}</style>
         <div class="header-banner">
@@ -71,9 +69,7 @@ def build_gradio_ui():
         """)
         
         with gr.Row():
-            # 왼쪽: 챗봇 UI
             with gr.Column(scale=7):
-                # TypeError 방지를 위해 type="messages" 제거
                 chatbot = gr.Chatbot(height=600, show_label=False)
                 with gr.Row():
                     msg_input = gr.Textbox(
@@ -92,31 +88,29 @@ def build_gradio_ui():
                 
                 gr.ClearButton([msg_input, chatbot], value="세션 초기화", size="sm")
 
-            # 오른쪽: 상태 및 참조 패널
             with gr.Column(scale=3):
                 gr.Markdown("### 시스템 아키텍처 상태")
                 with gr.Group():
                     gr.Textbox(value="qwen2.5:14b (Local Ollama)", label="추론 엔진", interactive=False)
                     gr.Textbox(value="Agentic Router + MD RAG", label="검색 아키텍처", interactive=False)
                 
-                # 라우터가 추출한 파라미터 확인용
                 gr.Markdown("### Optimized Query Process")
                 params_display = gr.JSON(label="추출된 검색 파라미터", value={})
                 
                 gr.Markdown("### 참조 문서 데이터 원천 (Sources)")
                 source_display = gr.HTML(value="<div class='source-panel' style='color: #64748b; text-align: center; padding-top: 30px;'>질의 실행 시 참조된 원본 문서 경로가 표출됩니다.</div>")
 
-        # 튜플 리스트 방식 [[user, bot]]으로 상태 관리 변경
         def user_interaction(user_message, history):
             history = history or []
-            history.append([user_message, None])
+            # Dictionary 포맷 유지
+            history.append({"role": "user", "content": user_message})
             return "", history
 
         def bot_interaction(history):
             if not history: 
                 return history, "", {}
             
-            raw_user_message = history[-1][0]
+            raw_user_message = history[-1]["content"]
             answer, sources, params = engine.execute_query(raw_user_message)
             
             source_html = "<div class='source-panel'>"
@@ -127,10 +121,9 @@ def build_gradio_ui():
                 source_html += "<div style='color: #64748b; text-align: center; padding: 20px;'>참조된 문서 데이터가 존재하지 않습니다.</div>"
             source_html += "</div>"
             
-            history[-1][1] = answer
+            history.append({"role": "assistant", "content": answer})
             return history, source_html, params
 
-        # 이벤트 체인
         msg_input.submit(user_interaction, [msg_input, chatbot], [msg_input, chatbot], queue=False).then(
             bot_interaction, chatbot, [chatbot, source_display, params_display]
         )
@@ -143,5 +136,4 @@ def build_gradio_ui():
 if __name__ == "__main__":
     logger.info("웹 서버 시작 (Share 활성화)")
     app = build_gradio_ui()
-    # share 켜고 폰트 로드를 위해 allowed_paths 등록
     app.launch(server_name="0.0.0.0", server_port=7860, share=True, allowed_paths=["."])
