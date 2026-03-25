@@ -1,7 +1,8 @@
 """
-Phase 3 RAG Generator
-- Streaming 응답 처리
-- Context Window(128k) 대응 및 사전 Truncation
+Phase 3 RAG Generator (BM25 + Kiwi Tokenizer)
+- Kiwi 형태소 분석기 기반 BM25 본문 검색
+- Stream response 처리
+- Context Window(128k) 대응 및 사전 Truncate
 """
 import logging
 import requests
@@ -10,6 +11,8 @@ import json
 import time
 from pathlib import Path
 from typing import List, Dict, Any, Generator, Union
+from rank_bm25 import BM25Okapi
+from kiwipiepy import Kiwi
 
 logger = logging.getLogger("RAG_GEN")
 logger.setLevel(logging.INFO)
@@ -26,51 +29,101 @@ class RAGGenerator:
         self.model_id = config['DEFAULT'].get('MODEL_ID', 'qwen2.5:14b')
         self.api_url = config['DEFAULT'].get('OLLAMA_URL', 'http://localhost:11434/api/generate')
         
-        # 128k context 세팅
         self.num_ctx = 131072
         self.req_timeout = 600
-        # Context window 방어선 (약 160k chars)
         self.max_char_limit = 160000 
+        
+        self.top_k = 5
 
-    def _load_context(self, target_files: Union[List[str], List[Dict]]) -> str:
+        # 형태소 분석기 초기화
+        logger.info("Init Kiwi tokenizer")
+        self.kiwi = Kiwi()
+
+    def _tokenize(self, text: str) -> List[str]:
+        if not text.strip():
+            return []
+        # 형태소 분석 후 조사(J) 및 기호(S) 제외
+        tokens = self.kiwi.tokenize(text)
+        return [t.form for t in tokens if not t.tag.startswith('J') and not t.tag.startswith('S')]
+
+    def _retrieve_bm25(self, query: str, file_paths: List[str]) -> List[Dict[str, Any]]:
+        docs = []
+        valid_paths = []
+        
+        for path in file_paths:
+            fpath = self.target_dir / path
+            if fpath.exists():
+                docs.append(fpath.read_text(encoding='utf-8'))
+                valid_paths.append(path)
+            else:
+                logger.warning(f"File not found: {path}")
+
+        if not docs:
+            return []
+
+        logger.info(f"Calc BM25 scores for {len(docs)} docs")
+        tokenized_docs = [self._tokenize(doc) for doc in docs]
+        bm25 = BM25Okapi(tokenized_docs)
+        
+        tokenized_query = self._tokenize(query)
+        scores = bm25.get_scores(tokenized_query)
+
+        # Sort desc
+        top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:self.top_k]
+        
+        results = []
+        for idx in top_indices:
+            if scores[idx] > 0.0:
+                results.append({
+                    "file_path": valid_paths[idx],
+                    "score": round(float(scores[idx]), 4)
+                })
+                
+        logger.info(f"BM25 retrieve done. Selected: {len(results)} ea")
+        return results
+
+    def _load_context(self, target_files: List[Dict]) -> str:
         context_blocks = []
         current_len = 0
         
-        # Phase 3(BM25)의 dict 결과물과 단순 str 리스트 모두 호환
-        paths = []
         for item in target_files:
-            if isinstance(item, dict) and "file_path" in item:
-                paths.append(item["file_path"])
-            else:
-                paths.append(item)
-        
-        for file_path in paths:
+            file_path = item["file_path"]
             fpath = self.target_dir / file_path
-            if fpath.exists():
-                text = fpath.read_text(encoding='utf-8')
-                block = f"--- [Doc: {file_path}] ---\n{text}\n\n"
+            
+            if not fpath.exists():
+                continue
                 
-                if current_len + len(block) > self.max_char_limit:
-                    allowed_len = self.max_char_limit - current_len
-                    if allowed_len > 100:
-                        context_blocks.append(block[:allowed_len] + "\n...[Truncated]...")
-                    logger.warning(f"Context 최대 길이 초과 ({self.max_char_limit} chars). 이후 텍스트 Truncate 처리")
-                    break
-                
-                context_blocks.append(block)
-                current_len += len(block)
-            else:
-                logger.warning(f"참조 문서 누락: {file_path}")
+            text = fpath.read_text(encoding='utf-8')
+            block = f"--- [Doc: {file_path}] ---\n{text}\n\n"
+            
+            if current_len + len(block) > self.max_char_limit:
+                allowed_len = self.max_char_limit - current_len
+                if allowed_len > 100:
+                    context_blocks.append(block[:allowed_len] + "\n...[Truncated]...")
+                logger.warning(f"Context limit exceeded ({self.max_char_limit} chars). Truncating.")
+                break
+            
+            context_blocks.append(block)
+            current_len += len(block)
                 
         return "".join(context_blocks)
 
-    def generate_stream(self, query: str, target_files: Union[List[str], List[Dict]]) -> Generator[Dict[str, Any], None, None]:
+    def generate_stream(self, query: str, target_files: Union[List[str], List[Dict]], search_query: str = None) -> Generator[Dict[str, Any], None, None]:
         if not target_files:
             yield {"answer": "조건에 부합하는 문서가 없어 답변할 수 없습니다.", "references": []}
             return
 
-        context = self._load_context(target_files)
-        logger.info(f"Context 로드 완료 (length: {len(context)} chars)")
+        bm25_targets = target_files
+        if isinstance(target_files[0], str):
+            bm25_query = search_query if search_query else query
+            bm25_targets = self._retrieve_bm25(bm25_query, target_files)
+
+        if not bm25_targets:
+            yield {"answer": "본문 내에 일치하는 내용이 존재하지 않습니다.", "references": []}
+            return
+
+        context = self._load_context(bm25_targets)
+        logger.info(f"Context loaded. Length: {len(context)} chars")
         
         prompt = f"""다음 제공된 [Context] 문서들만 참고해서 [Query]에 대한 답변 작성.
 Context에 없는 내용은 지어내지 말고, "해당 내용은 문서에서 확인할 수 없습니다"라고 할 것.
@@ -92,7 +145,7 @@ Context에 없는 내용은 지어내지 말고, "해당 내용은 문서에서 
             }
         }
 
-        logger.info("Ollama stream inference 요청")
+        logger.info("Req stream inference")
         start_t = time.time()
         first_token_received = False
 
@@ -105,7 +158,7 @@ Context에 없는 내용은 지어내지 말고, "해당 내용은 문서에서 
                     if line:
                         if not first_token_received:
                             ttft = time.time() - start_t
-                            logger.info(f"TTFT (First Token): {ttft:.2f}s")
+                            logger.info(f"TTFT: {ttft:.2f}s")
                             first_token_received = True
 
                         chunk = json.loads(line.decode('utf-8'))
@@ -113,12 +166,12 @@ Context에 없는 내용은 지어내지 말고, "해당 내용은 문서에서 
                         
                         yield {
                             "answer": full_answer,
-                            "references": target_files
+                            "references": bm25_targets
                         }
                         
         except requests.exceptions.RequestException as e:
-            logger.error(f"API 통신 에러: {e}")
+            logger.error(f"API Error: {e}")
             yield {
                 "answer": f"답변 생성 중 에러 발생: {e}",
-                "references": target_files
+                "references": bm25_targets
             }
