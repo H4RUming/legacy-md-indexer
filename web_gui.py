@@ -1,3 +1,11 @@
+"""
+Module: Web GUI
+Description:
+    - Gradio 5.x messages format 완벽 대응
+    - Phase 2 (Agentic Router), Phase 3 (RAG Generator) 통합
+    - JSON 기반 사용자 인터랙션 로깅 및 추론 중지(Stop) 지원
+"""
+
 import logging
 import gradio as gr
 import json
@@ -8,7 +16,6 @@ from pathlib import Path
 from agentic_router import AgenticRouter
 from rag_generator import RAGGenerator
 
-# 전역 로거
 logger = logging.getLogger("RAG_GUI")
 logger.setLevel(logging.INFO)
 ch = logging.StreamHandler()
@@ -17,7 +24,6 @@ logger.addHandler(ch)
 
 LOG_FILE_PATH = Path("./interaction_logs.json")
 
-# 로컬 폰트 및 소스 패널용 CSS (타이틀 CSS는 HTML 인라인으로 이동)
 custom_css = """
 @font-face {
     font-family: 'NanumGothic';
@@ -35,7 +41,7 @@ class IntegratedRAGEngine:
             self.router = AgenticRouter(catalog_path="./file_catalog.json")
             self.generator = RAGGenerator(target_dir="./processed_md")
             self._init_log_file()
-            logger.info("RAG 통합 엔진 및 로깅 시스템 로드 완료")
+            logger.info("RAG 통합 엔진 로드 완료")
         except Exception as e:
             logger.error(f"엔진 초기화 에러: {e}")
 
@@ -107,12 +113,11 @@ def build_gradio_ui():
     ]
 
     with gr.Blocks(css=None) as demo:
-        # Gradio 기본 테마 덮어쓰기용 강제 인라인 스타일 적용
         gr.HTML(f"""
         <style>{custom_css}</style>
         <div style="background: linear-gradient(135deg, #1e293b 0%, #334155 100%); padding: 24px 32px; border-radius: 8px; margin-bottom: 16px; box-shadow: 0 2px 10px rgba(0,0,0,0.05);">
             <h1 style="margin: 0; color: #ffffff !important; font-weight: 700; font-size: 26px; letter-spacing: -0.5px; border-bottom: none;">LLM-Based Hierarchical Document Intelligence Engine</h1>
-            <p style="margin: 8px 0 0 0; color: #cbd5e1 !important; font-size: 14px;">현재 프로토타입 버전으로, 불안정하거나 간혹 잘못된 정보를 제공할 수 있습니다.<br>참조 파일의 크기가 큰 경우, 간혹 추론에 오랜 시간이 소요될 수 있습니다.</p>
+            <p style="margin: 8px 0 0 0; color: #cbd5e1 !important; font-size: 14px;">현재 프로토타입 버전으로, 불안정하거나 간혹 잘못된 정보를 제공할 수 있습니다.</p>
         </div>
         """)
         
@@ -130,7 +135,7 @@ def build_gradio_ui():
             with gr.Column(scale=3):
                 gr.Markdown("### 시스템 아키텍처 상태")
                 with gr.Group():
-                    gr.Textbox(value="nemotron-cascade-2 (Local Ollama)", label="추론 엔진", interactive=False)
+                    gr.Textbox(value="qwen2.5:14b (Local Ollama)", label="추론 엔진", interactive=False)
                     gr.Textbox(value="Agentic Router + MD RAG", label="검색 아키텍처", interactive=False)
                 
                 gr.Markdown("### Optimized Query Process")
@@ -139,34 +144,50 @@ def build_gradio_ui():
                 gr.Markdown("### 참조 문서 데이터 원천 (Sources)")
                 source_display = gr.HTML(value="<div class='source-panel' style='color: #64748b; text-align: center; padding-top: 30px;'>질의 실행 시 참조된 원본 문서 경로가 표출됩니다.</div>")
 
+        # 1. 사용자 입력 (딕셔너리 포맷 적용)
         def user_interaction(user_message, history):
             history = history or []
-            history.append([user_message, None])
+            history.append({"role": "user", "content": user_message})
             return "", history
 
+        # 2. 라우팅 (봇의 임시 메시지도 딕셔너리로 적용)
         def bot_interaction_route(history):
-            if not history or not history[-1][0]: return history, "", {}
-            route_res, route_duration = engine.route_query(history[-1][0])
-            history[-1][1] = "라우팅 완료. RAG 답변 생성 중입니다... (중지 버튼으로 중단 가능)"
-            return history, "", route_res, route_duration, history[-1][0]
+            if not history or history[-1]["role"] != "user": 
+                return history, "", {}, 0, ""
+            
+            query = history[-1]["content"]
+            route_res, route_duration = engine.route_query(query)
+            
+            history.append({
+                "role": "assistant", 
+                "content": "라우팅 완료. RAG 답변 생성 중입니다... (중지 버튼으로 중단 가능)"
+            })
+            return history, "", route_res, route_duration, query
 
+        # 3. 답변 생성 (딕셔너리 업데이트)
         async def bot_interaction_generate(history, route_res, route_duration, query):
-            if history[-1][1] == "(중지됨)": return history, "", {}
+            if not history or history[-1]["role"] != "assistant": 
+                return history, "", {}
+            if history[-1]["content"] == "(중지됨)": 
+                return history, "", {}
+                
             try:
                 answer, sources, params = await engine.generate_answer(query, route_res, route_duration)
+                
                 source_html = "<div class='source-panel'>"
                 if sources:
-                    for idx, src in enumerate(sources, 1): source_html += f"<div class='source-item'><b>[{idx}]</b> {src}</div>"
+                    for idx, src in enumerate(sources, 1): 
+                        source_html += f"<div class='source-item'><b>[{idx}]</b> {src}</div>"
                 else: 
                     source_html += "<div style='color: #64748b; text-align: center; padding: 20px;'>참조된 문서 데이터가 존재하지 않습니다.</div>"
                 source_html += "</div>"
                 
-                history[-1][1] = answer
+                history[-1]["content"] = answer
                 return history, source_html, params
 
             except asyncio.CancelledError:
-                history[-1][1] = "사용자에 의해 추론이 중지되었습니다."
-                return history, "", route_res["parameters"]
+                history[-1]["content"] = "사용자에 의해 추론이 중지되었습니다."
+                return history, "", route_res.get("parameters", {})
 
         msg_query_state = gr.State()
         route_res_state = gr.State()
