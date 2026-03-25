@@ -5,7 +5,7 @@ A high-throughput **Hierarchical RAG Pipeline** designed for metadata extraction
 
 ---
 
-## 🛠 Core Pipeline
+## Core Pipeline
 
 ### Phase 0: Document ETL (Pre-requisite)
 Transforms raw, multi-format legacy documents (PDF, DOCX, XLSX, etc.) into **structured Markdown** optimized for LLM ingestion.
@@ -31,7 +31,7 @@ Executes full-text search on filtered documents and generates the final response
 
 ---
 
-## 🚀 System Engineering & Stability
+## System Engineering & Stability
 
 * **Crash-safe State Management:** Executes synchronous state saves immediately after processing each file, ensuring zero data loss and instant resume capability.
 * **Context Defense:** Hard-coded 160,000-character truncation guardrail to prevent context overflow and memory exhaustion.
@@ -40,7 +40,7 @@ Executes full-text search on filtered documents and generates the final response
 
 ---
 
-## 💻 Tech Stack
+## Tech Stack
 - **Language:** Python 3.10+
 - **LLM Engine:** Ollama (Qwen 2.5 14B / 72B / 120B)
 - **NLP / Retrieval:** Kiwipiepy (Kiwi), Rank-BM25
