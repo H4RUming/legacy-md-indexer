@@ -119,7 +119,7 @@ def build_gradio_ui():
             with gr.Column(scale=3):
                 gr.Markdown("### 아키텍처 정보")
                 with gr.Group():
-                    gr.Textbox(value="qwen2.5:14b (Ollama)", label="Model", interactive=False)
+                    gr.Textbox(value="GPT-OSS:120b (Ollama)", label="Model", interactive=False)
                     gr.Textbox(value="Agentic Router + Integrated BM25", label="Pipeline", interactive=False)
                 
                 gr.Markdown("### 추출 파라미터")
