@@ -1,7 +1,7 @@
 """
 Phase 2 Agentic Router
 - Query 분석 및 param 추출
-- Gradio 5 input 예외처리 및 JSON 파싱
+- JSON 파싱 강화 및 Context 폭발 방어 (Max docs limit)
 """
 import json
 import logging
@@ -24,7 +24,7 @@ class AgenticRouter:
         
         config = configparser.ConfigParser()
         config.read('setting.conf')
-        self.model_id = config['DEFAULT'].get('MODEL_ID', 'qwen2.5:14b')
+        self.model_id = config['DEFAULT'].get('MODEL_ID', 'gpt-oss:120b')
         self.api_url = config['DEFAULT'].get('OLLAMA_URL', 'http://localhost:11434/api/generate')
 
     def _load_catalog(self) -> dict:
@@ -34,7 +34,7 @@ class AgenticRouter:
             return json.load(f)
 
     def _clean_query(self, query: Any) -> str:
-        # Gradio dict/list payload 대응
+        # Gradio payload 예외처리
         if isinstance(query, list) and len(query) > 0 and isinstance(query[0], dict):
             return query[0].get('text', str(query))
         if isinstance(query, dict):
@@ -42,22 +42,20 @@ class AgenticRouter:
         return str(query)
 
     def _extract_parameters(self, query: str) -> dict:
-        # 최근 2년 등 상대 시간 처리를 위해 현재 연도 주입
         current_year = 2026
         
         prompt = f"""
-        질문에서 검색 param 추출. JSON만 출력.
-        해당 없으면 빈 배열([]) 또는 null.
-
+        사용자 질의에서 검색 파라미터만 추출하여 JSON으로 응답하라. 부가 설명 금지.
+        
         [조건]
-        - years: 연도 (list of int). 현재 {current_year}년 기준 '최근 2년' 등은 계산해서 배열로 리턴 (예: [2025, 2026])
-        - months: 월 (list of int)
-        - keyword: 핵심 키워드 (string, 예: "정비", "엘리베이터")
-
+        - years: 연도 (list of int). 현재 {current_year}년 기준. '최근 2년'이면 [2025, 2026] 처럼 계산.
+        - months: 월 (list of int). 조건 없으면 []
+        - keyword: 검색어 (string). 조건 없으면 null
+        
         [질문]
         "{query}"
-
-        [출력 예시]
+        
+        [출력]
         {{"years": [2025, 2026], "months": [], "keyword": "엘리베이터"}}
         """
 
@@ -65,7 +63,7 @@ class AgenticRouter:
             "model": self.model_id,
             "prompt": prompt,
             "stream": False,
-            "format": "json",
+            # Qwen 등 일부 모델에서 format="json" 옵션이 응답을 망가뜨릴 수 있어 제거 (프롬프트로 통제)
             "options": {"temperature": 0.0}
         }
 
@@ -74,16 +72,22 @@ class AgenticRouter:
             res.raise_for_status()
             res_text = res.json().get("response", "")
             
-            # <think> 태그 및 마크다운 노이즈 제거
-            clean_text = re.sub(r'<think>.*?</think>', '', res_text, flags=re.DOTALL)
+            # 1차 정제: <think> 태그 및 마크다운 노이즈 제거
+            clean_text = re.sub(r'<think>.*?</think>', '', res_text, flags=re.DOTALL).strip()
             clean_text = re.sub(r'```json|```', '', clean_text).strip()
             
-            match = re.search(r'\{.*\}', clean_text, re.DOTALL)
-            if match:
-                return json.loads(match.group(0))
-            else:
-                logger.error("JSON parse fail")
-                return {"years": [], "months": [], "keyword": None}
+            try:
+                # 1차 시도: 텍스트 전체 JSON 파싱
+                return json.loads(clean_text)
+            except json.JSONDecodeError:
+                # 2차 시도: 정규식으로 {} 블록만 강제 추출
+                match = re.search(r'\{[\s\S]*\}', clean_text)
+                if match:
+                    return json.loads(match.group(0))
+                else:
+                    # 파싱 실패 시 원본 응답 로그 출력 (디버깅용)
+                    logger.error(f"JSON parse fail. Raw response: {res_text}")
+                    return {"years": [], "months": [], "keyword": None}
                 
         except Exception as e:
             logger.error(f"Param extract error: {e}")
@@ -94,11 +98,10 @@ class AgenticRouter:
         target_months = params.get("months") or []
         keyword = params.get("keyword")
 
-        # 기존 포맷(단일 int) 하위호환용
-        if "year" in params and isinstance(params["year"], int):
-            target_years.append(params["year"])
-        if "month" in params and isinstance(params["month"], int):
-            target_months.append(params["month"])
+        # 필터 조건이 아예 없는 경우 (파싱 실패 등), 풀스캔 방지
+        if not target_years and not target_months and not keyword:
+            logger.warning("검색 조건 없음. 풀스캔 방지를 위해 빈 리스트 반환")
+            return []
 
         filtered_files = []
 
@@ -129,6 +132,13 @@ class AgenticRouter:
         logger.info(f"Extracted params: {params}")
 
         target_files = self._filter_catalog(params)
+        
+        # OOM(Out of Memory) 및 Context limit 방어: 최대 문서 수 제한
+        MAX_DOCS = 50 
+        if len(target_files) > MAX_DOCS:
+            logger.warning(f"검색된 문서가 너무 많습니다. ({len(target_files)} ea). {MAX_DOCS}개로 제한(Truncate)합니다.")
+            target_files = target_files[:MAX_DOCS]
+            
         logger.info(f"Filtered docs: {len(target_files)} ea")
 
         return {
