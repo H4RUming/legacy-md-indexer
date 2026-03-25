@@ -92,12 +92,9 @@ def build_gradio_ui():
     example_queries = [
         ["2024년 이동장비 주요 정비 내역 요약"],
         ["최근 2년간 엘리베이터 수리 내역"],
-        ["어제 진행된 정비 로그에서 특이사항 정리해 줘"],
         ["교체시기가 오래된 부품들의 리스트를 알려줘"],
         ["교체가 잦은 부품들의 리스트를 보여주세요"],
         ["24년 예방정비 실적"],
-        ["CM2350 Technical Package에 대해 설명해줘"],
-        ["크레인 연간 정비 계힉"],
         ["트위스트락 교체 이력을 알려줘"],
         ["COSCO Shipping 업무협의 내용"]
     ]
@@ -215,4 +212,4 @@ def build_gradio_ui():
 if __name__ == "__main__":
     logger.info("Starting Web Server")
     app = build_gradio_ui()
-    app.launch(server_name="0.0.0.0", server_port=7860, allowed_paths=["."])
+    app.launch(server_name="0.0.0.0", server_port=7860, share=True, allowed_paths=["."])
