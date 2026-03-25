@@ -1,6 +1,6 @@
 /.venv
 /processed_md
-file_catalog.json
+*.json
 /__pycache__
 /.gradio
-/interaction_logs.json
+*.log
