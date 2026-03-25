@@ -1,16 +1,23 @@
 import logging
 import gradio as gr
+import json
+import time
+import asyncio
+from datetime import datetime
+from pathlib import Path
 from agentic_router import AgenticRouter
 from rag_generator import RAGGenerator
 
 # 전역 로거
-logger = logging.getLogger("RAG_UI")
+logger = logging.getLogger("RAG_GUI")
 logger.setLevel(logging.INFO)
 ch = logging.StreamHandler()
 ch.setFormatter(logging.Formatter('[%(levelname)s] %(asctime)s - %(message)s', '%H:%M:%S'))
 logger.addHandler(ch)
 
-# 로컬 폰트 및 커스텀 UI CSS
+LOG_FILE_PATH = Path("./interaction_logs.json")
+
+# 로컬 폰트 및 소스 패널용 CSS (타이틀 CSS는 HTML 인라인으로 이동)
 custom_css = """
 @font-face {
     font-family: 'NanumGothic';
@@ -18,30 +25,75 @@ custom_css = """
 }
 * { font-family: 'NanumGothic', sans-serif !important; }
 .gradio-container { max-width: 1400px !important; }
-.header-banner { background: linear-gradient(135deg, #1e293b 0%, #334155 100%); padding: 24px 32px; border-radius: 8px; color: white; margin-bottom: 16px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
-.header-banner h1 { margin: 0; color: #f8fafc; font-weight: 700; font-size: 24px; letter-spacing: -0.5px; }
-.header-banner p { margin: 8px 0 0 0; color: #cbd5e1; font-size: 14px; }
 .source-panel { background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 16px; font-size: 13px; max-height: 550px; overflow-y: auto; }
 .source-item { margin-bottom: 8px; padding: 10px 12px; background: white; border-left: 4px solid #475569; border-radius: 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); word-break: break-all; color: #334155; }
 """
 
 class IntegratedRAGEngine:
-    """백엔드 모듈 연동 래퍼"""
     def __init__(self):
         try:
             self.router = AgenticRouter(catalog_path="./file_catalog.json")
             self.generator = RAGGenerator(target_dir="./processed_md")
-            logger.info("RAG 엔진 로드 완료")
+            self._init_log_file()
+            logger.info("RAG 통합 엔진 및 로깅 시스템 로드 완료")
         except Exception as e:
             logger.error(f"엔진 초기화 에러: {e}")
 
-    def execute_query(self, query: str):
+    def _init_log_file(self):
+        if not LOG_FILE_PATH.exists():
+            with open(LOG_FILE_PATH, 'w', encoding='utf-8') as f:
+                json.dump([], f)
+
+    def _log_interaction(self, query: str, params: dict, targets: list, answer: str, duration: float, status: str = "COMPLETED"):
+        try:
+            with open(LOG_FILE_PATH, 'r', encoding='utf-8') as f:
+                logs = json.load(f)
+
+            logs.append({
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "status": status,
+                "user_query": query,
+                "processing_duration_s": round(duration, 3),
+                "routing_result": {
+                    "parameters": params,
+                    "target_files_count": len(targets)
+                },
+                "rag_result": {
+                    "answer": answer,
+                    "referenced_files": targets
+                }
+            })
+
+            with open(LOG_FILE_PATH, 'w', encoding='utf-8') as f:
+                json.dump(logs, f, ensure_ascii=False, indent=2)
+            
+            logger.info("인터랙션 데이터 로깅 완료")
+        except Exception as e:
+            logger.error(f"로깅 실패: {e}")
+
+    def route_query(self, query: str):
+        start_t = time.time()
         route_res = self.router.route_query(query)
-        rag_res = self.generator.generate(
-            query=route_res["query"], 
-            target_files=route_res["target_files"]
-        )
-        return rag_res["answer"], rag_res["references"], route_res["parameters"]
+        return route_res, time.time() - start_t
+
+    async def generate_answer(self, query: str, route_result: dict, route_duration: float):
+        start_gen_t = time.time()
+        loop = asyncio.get_running_loop()
+        try:
+            rag_res = await loop.run_in_executor(None, self.generator.generate, query, route_result["target_files"])
+            total_duration = route_duration + (time.time() - start_gen_t)
+
+            self._log_interaction(query, route_result["parameters"], route_result["target_files"], rag_res["answer"], total_duration, "COMPLETED")
+            return rag_res["answer"], rag_res["references"], route_result["parameters"]
+        
+        except asyncio.CancelledError:
+            logger.warning("RAG 추론 중지됨")
+            self._log_interaction(query, route_result["parameters"], route_result["target_files"], "(추론 중지됨)", route_duration + (time.time() - start_gen_t), "STOPPED_BY_USER")
+            raise 
+
+        except Exception as e:
+            logger.error(f"Generation 에러: {e}")
+            return f"오류 발생: {e}", [], route_result["parameters"]
 
 def build_gradio_ui():
     engine = IntegratedRAGEngine()
@@ -51,20 +103,16 @@ def build_gradio_ui():
         ["최근 2년간 엘리베이터 수리 내역"],
         ["어제 진행된 정비 로그에서 특이사항 정리해 줘"],
         ["교체시기가 오래된 부품들의 리스트를 알려줘"],
-        ["교체가 잦은 부품들의 리스트를 보여주세요"],
-        ["24년 예방정비 실적"],
-        ["CM2350 Technical Package에 대해 설명해줘"],
-        ["크레인 연간 정비 계획"],
-        ["트위스트락 교체 이력을 알려줘"],
-        ["COSCO Shipping 업무협의 내용"]
+        ["교체가 잦은 부품들의 리스트를 보여주세요"]
     ]
 
-    with gr.Blocks() as demo:
+    with gr.Blocks(css=None) as demo:
+        # Gradio 기본 테마 덮어쓰기용 강제 인라인 스타일 적용
         gr.HTML(f"""
         <style>{custom_css}</style>
-        <div class="header-banner">
-            <h1>LLM-Based Hierarchical Document Intelligence Engine</h1>
-            <p>현재 프로토타입 버전으로, 불안정하거나 간혹 잘못된 정보를 제공할 수 있습니다.</p>
+        <div style="background: linear-gradient(135deg, #1e293b 0%, #334155 100%); padding: 24px 32px; border-radius: 8px; margin-bottom: 16px; box-shadow: 0 2px 10px rgba(0,0,0,0.05);">
+            <h1 style="margin: 0; color: #ffffff !important; font-weight: 700; font-size: 26px; letter-spacing: -0.5px; border-bottom: none;">LLM-Based Hierarchical Document Intelligence Engine</h1>
+            <p style="margin: 8px 0 0 0; color: #cbd5e1 !important; font-size: 14px;">현재 프로토타입 버전으로, 불안정하거나 간혹 잘못된 정보를 제공할 수 있습니다.<br>참조 파일의 크기가 큰 경우, 간혹 추론에 오랜 시간이 소요될 수 있습니다.</p>
         </div>
         """)
         
@@ -72,20 +120,11 @@ def build_gradio_ui():
             with gr.Column(scale=7):
                 chatbot = gr.Chatbot(height=600, show_label=False)
                 with gr.Row():
-                    msg_input = gr.Textbox(
-                        show_label=False, 
-                        placeholder="질의를 입력하십시오.", 
-                        container=False, 
-                        scale=8
-                    )
+                    msg_input = gr.Textbox(show_label=False, placeholder="질의를 입력하십시오. (Enter 또는 실행 버튼)", container=False, scale=7)
                     submit_btn = gr.Button("실행", variant="primary", scale=1)
+                    stop_btn = gr.Button("중지", variant="stop", scale=1, interactive=True)
                 
-                gr.Examples(
-                    examples=example_queries,
-                    inputs=msg_input,
-                    label="자주 묻는 질문 예시"
-                )
-                
+                gr.Examples(examples=example_queries, inputs=msg_input, label="자주 묻는 질문 예시")
                 gr.ClearButton([msg_input, chatbot], value="세션 초기화", size="sm")
 
             with gr.Column(scale=3):
@@ -102,34 +141,46 @@ def build_gradio_ui():
 
         def user_interaction(user_message, history):
             history = history or []
-            # Dictionary 포맷 유지
-            history.append({"role": "user", "content": user_message})
+            history.append([user_message, None])
             return "", history
 
-        def bot_interaction(history):
-            if not history: 
-                return history, "", {}
-            
-            raw_user_message = history[-1]["content"]
-            answer, sources, params = engine.execute_query(raw_user_message)
-            
-            source_html = "<div class='source-panel'>"
-            if sources:
-                for idx, src in enumerate(sources, 1): 
-                    source_html += f"<div class='source-item'><b>[{idx}]</b> {src}</div>"
-            else: 
-                source_html += "<div style='color: #64748b; text-align: center; padding: 20px;'>참조된 문서 데이터가 존재하지 않습니다.</div>"
-            source_html += "</div>"
-            
-            history.append({"role": "assistant", "content": answer})
-            return history, source_html, params
+        def bot_interaction_route(history):
+            if not history or not history[-1][0]: return history, "", {}
+            route_res, route_duration = engine.route_query(history[-1][0])
+            history[-1][1] = "라우팅 완료. RAG 답변 생성 중입니다... (중지 버튼으로 중단 가능)"
+            return history, "", route_res, route_duration, history[-1][0]
 
-        msg_input.submit(user_interaction, [msg_input, chatbot], [msg_input, chatbot], queue=False).then(
-            bot_interaction, chatbot, [chatbot, source_display, params_display]
-        )
-        submit_btn.click(user_interaction, [msg_input, chatbot], [msg_input, chatbot], queue=False).then(
-            bot_interaction, chatbot, [chatbot, source_display, params_display]
-        )
+        async def bot_interaction_generate(history, route_res, route_duration, query):
+            if history[-1][1] == "(중지됨)": return history, "", {}
+            try:
+                answer, sources, params = await engine.generate_answer(query, route_res, route_duration)
+                source_html = "<div class='source-panel'>"
+                if sources:
+                    for idx, src in enumerate(sources, 1): source_html += f"<div class='source-item'><b>[{idx}]</b> {src}</div>"
+                else: 
+                    source_html += "<div style='color: #64748b; text-align: center; padding: 20px;'>참조된 문서 데이터가 존재하지 않습니다.</div>"
+                source_html += "</div>"
+                
+                history[-1][1] = answer
+                return history, source_html, params
+
+            except asyncio.CancelledError:
+                history[-1][1] = "사용자에 의해 추론이 중지되었습니다."
+                return history, "", route_res["parameters"]
+
+        msg_query_state = gr.State()
+        route_res_state = gr.State()
+        route_dur_state = gr.State()
+
+        submit_event = submit_btn.click(user_interaction, [msg_input, chatbot], [msg_input, chatbot], queue=False).then(
+            bot_interaction_route, [chatbot], [chatbot, source_display, route_res_state, route_dur_state, msg_query_state], queue=False).then(
+            bot_interaction_generate, [chatbot, route_res_state, route_dur_state, msg_query_state], [chatbot, source_display, params_display], queue=True)
+
+        input_event = msg_input.submit(user_interaction, [msg_input, chatbot], [msg_input, chatbot], queue=False).then(
+            bot_interaction_route, [chatbot], [chatbot, source_display, route_res_state, route_dur_state, msg_query_state], queue=False).then(
+            bot_interaction_generate, [chatbot, route_res_state, route_dur_state, msg_query_state], [chatbot, source_display, params_display], queue=True)
+        
+        stop_btn.click(fn=None, inputs=None, outputs=None, cancels=[submit_event, input_event])
         
     return demo
 

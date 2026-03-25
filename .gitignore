@@ -3,3 +3,4 @@
 file_catalog.json
 /__pycache__
 /.gradio
+/interaction_logs.json
