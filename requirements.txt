@@ -6,3 +6,4 @@ tqdm
 pathlib
 pandas
 gradio
+rank_bm25
