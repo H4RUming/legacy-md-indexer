@@ -42,7 +42,7 @@ Executes full-text search on filtered documents and generates the final response
 
 ## Tech Stack
 - **Language:** Python 3.10+
-- **LLM Engine:** Ollama (Qwen 2.5 14B / 72B / 120B)
+- **LLM Engine:** Ollama (GPT-OSS 120B)
 - **NLP / Retrieval:** Kiwipiepy (Kiwi), Rank-BM25
 - **ETL:** Docling, EasyOCR, Pandas
 - **Frontend:** Gradio 5.x
