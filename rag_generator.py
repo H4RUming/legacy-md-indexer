@@ -140,7 +140,7 @@ Context에 없는 내용은 지어내지 말고, "해당 내용은 문서에서 
             "prompt": prompt,
             "stream": True,
             "options": {
-                "temperature": 0.1,
+                "temperature": 0.6,
                 "num_ctx": self.num_ctx
             }
         }
