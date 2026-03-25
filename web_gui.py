@@ -2,7 +2,7 @@
 Module: Web GUI
 Description:
     - Gradio 5.x messages format 완벽 대응
-    - Phase 2 (Agentic Router), Phase 3 (RAG Generator) 통합
+    - 스트리밍 출력(Streaming) 적용하여 실시간 타이핑 효과
     - JSON 기반 사용자 인터랙션 로깅 및 추론 중지(Stop) 지원
 """
 
@@ -10,7 +10,6 @@ import logging
 import gradio as gr
 import json
 import time
-import asyncio
 from datetime import datetime
 from pathlib import Path
 from agentic_router import AgenticRouter
@@ -82,24 +81,6 @@ class IntegratedRAGEngine:
         route_res = self.router.route_query(query)
         return route_res, time.time() - start_t
 
-    async def generate_answer(self, query: str, route_result: dict, route_duration: float):
-        start_gen_t = time.time()
-        loop = asyncio.get_running_loop()
-        try:
-            rag_res = await loop.run_in_executor(None, self.generator.generate, query, route_result["target_files"])
-            total_duration = route_duration + (time.time() - start_gen_t)
-
-            self._log_interaction(query, route_result["parameters"], route_result["target_files"], rag_res["answer"], total_duration, "COMPLETED")
-            return rag_res["answer"], rag_res["references"], route_result["parameters"]
-        
-        except asyncio.CancelledError:
-            logger.warning("RAG 추론 중지됨")
-            self._log_interaction(query, route_result["parameters"], route_result["target_files"], "(추론 중지됨)", route_duration + (time.time() - start_gen_t), "STOPPED_BY_USER")
-            raise 
-
-        except Exception as e:
-            logger.error(f"Generation 에러: {e}")
-            return f"오류 발생: {e}", [], route_result["parameters"]
 
 def build_gradio_ui():
     engine = IntegratedRAGEngine()
@@ -135,7 +116,7 @@ def build_gradio_ui():
             with gr.Column(scale=3):
                 gr.Markdown("### 시스템 아키텍처 상태")
                 with gr.Group():
-                    gr.Textbox(value="qwen2.5:14b (Local Ollama)", label="추론 엔진", interactive=False)
+                    gr.Textbox(value="GPT-OSS:120b (Local Ollama)", label="추론 엔진", interactive=False)
                     gr.Textbox(value="Agentic Router + MD RAG", label="검색 아키텍처", interactive=False)
                 
                 gr.Markdown("### Optimized Query Process")
@@ -144,13 +125,13 @@ def build_gradio_ui():
                 gr.Markdown("### 참조 문서 데이터 원천 (Sources)")
                 source_display = gr.HTML(value="<div class='source-panel' style='color: #64748b; text-align: center; padding-top: 30px;'>질의 실행 시 참조된 원본 문서 경로가 표출됩니다.</div>")
 
-        # 1. 사용자 입력 (딕셔너리 포맷 적용)
+        # 1. 사용자 입력
         def user_interaction(user_message, history):
             history = history or []
             history.append({"role": "user", "content": user_message})
             return "", history
 
-        # 2. 라우팅 (봇의 임시 메시지도 딕셔너리로 적용)
+        # 2. 라우팅
         def bot_interaction_route(history):
             if not history or history[-1]["role"] != "user": 
                 return history, "", {}, 0, ""
@@ -164,35 +145,50 @@ def build_gradio_ui():
             })
             return history, "", route_res, route_duration, query
 
-        # 3. 답변 생성 (딕셔너리 업데이트)
-        async def bot_interaction_generate(history, route_res, route_duration, query):
+        # 3. 답변 생성 (스트리밍 적용)
+        def bot_interaction_generate(history, route_res, route_duration, query):
             if not history or history[-1]["role"] != "assistant": 
-                return history, "", {}
-            if history[-1]["content"] == "(중지됨)": 
-                return history, "", {}
-                
+                yield history, "", {}
+                return
+            
+            start_gen_t = time.time()
+            full_answer = ""
+            
             try:
-                answer, sources, params = await engine.generate_answer(query, route_res, route_duration)
+                # 스트리밍 제너레이터 순회
+                for rag_chunk in engine.generator.generate_stream(query, route_res["target_files"]):
+                    full_answer = rag_chunk["answer"]
+                    sources = rag_chunk["references"]
+                    
+                    source_html = "<div class='source-panel'>"
+                    if sources:
+                        for idx, src in enumerate(sources, 1): 
+                            source_html += f"<div class='source-item'><b>[{idx}]</b> {src}</div>"
+                    else: 
+                        source_html += "<div style='color: #64748b; text-align: center; padding: 20px;'>참조된 문서 데이터가 존재하지 않습니다.</div>"
+                    source_html += "</div>"
+                    
+                    history[-1]["content"] = full_answer
+                    yield history, source_html, route_res.get("parameters", {})
                 
-                source_html = "<div class='source-panel'>"
-                if sources:
-                    for idx, src in enumerate(sources, 1): 
-                        source_html += f"<div class='source-item'><b>[{idx}]</b> {src}</div>"
-                else: 
-                    source_html += "<div style='color: #64748b; text-align: center; padding: 20px;'>참조된 문서 데이터가 존재하지 않습니다.</div>"
-                source_html += "</div>"
-                
-                history[-1]["content"] = answer
-                return history, source_html, params
+                # 끝까지 정상 완료된 경우 로깅
+                total_duration = route_duration + (time.time() - start_gen_t)
+                engine._log_interaction(query, route_res["parameters"], route_res["target_files"], full_answer, total_duration, "COMPLETED")
 
-            except asyncio.CancelledError:
-                history[-1]["content"] = "사용자에 의해 추론이 중지되었습니다."
-                return history, "", route_res.get("parameters", {})
+            except Exception as e:
+                # 사용자가 중지 버튼을 누르면 이 예외 블록으로 빠짐
+                logger.warning("RAG 추론이 사용자에 의해 중지되었습니다.")
+                history[-1]["content"] = full_answer + "\n\n[사용자에 의해 출력이 중지되었습니다.]"
+                total_duration = route_duration + (time.time() - start_gen_t)
+                engine._log_interaction(query, route_res["parameters"], route_res["target_files"], history[-1]["content"], total_duration, "STOPPED_BY_USER")
+                yield history, source_html, route_res.get("parameters", {})
+
 
         msg_query_state = gr.State()
         route_res_state = gr.State()
         route_dur_state = gr.State()
 
+        # 스트리밍을 위해 큐(Queue) 활성화
         submit_event = submit_btn.click(user_interaction, [msg_input, chatbot], [msg_input, chatbot], queue=False).then(
             bot_interaction_route, [chatbot], [chatbot, source_display, route_res_state, route_dur_state, msg_query_state], queue=False).then(
             bot_interaction_generate, [chatbot, route_res_state, route_dur_state, msg_query_state], [chatbot, source_display, params_display], queue=True)
