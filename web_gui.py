@@ -107,7 +107,10 @@ def build_gradio_ui():
         <style>{custom_css}</style>
         <div style="background: linear-gradient(135deg, #1e293b 0%, #334155 100%); padding: 24px 32px; border-radius: 8px; margin-bottom: 16px; box-shadow: 0 2px 10px rgba(0,0,0,0.05);">
             <h1 style="margin: 0; color: #ffffff !important; font-weight: 700; font-size: 26px; letter-spacing: -0.5px; border-bottom: none;">Legacy Document Intelligence Engine</h1>
-            <p style="margin: 8px 0 0 0; color: #cbd5e1 !important; font-size: 14px;">BM25 + MD RAG 통합 추론 모드</p>
+            <p style="margin: 8px 0 0 0; color: #cbd5e1 !important; font-size: 14px;">
+            현재 프로토타입 버전으로, 불안정하거나 잘못된 정보를 제공할 수 있습니다.<br>
+            참조 문서의 양이 너무 방대한 경우, 간혹 추론에 오랜 시간이 소요될 수 있습니다.
+            </p>
         </div>
         """)
         
