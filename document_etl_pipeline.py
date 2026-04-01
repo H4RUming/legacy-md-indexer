@@ -219,7 +219,7 @@ class DocumentETL:
 if __name__ == "__main__":
     # 설정 및 의존성 주입 (Dependency Injection)
     cfg = ETLConfig(
-        input_dir=Path("./자료"),
+        input_dir=Path("./files"),
         output_dir=Path("./processed_md")
     )
 
