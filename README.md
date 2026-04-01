@@ -31,6 +31,41 @@ Executes full-text search on filtered documents and generates the final response
 
 ---
 
+## Setup
+
+### Prerequisites
+- Python 3.10+
+- [Ollama](https://ollama.com/) running locally (`http://localhost:11434`)
+- 모델 사전 다운로드: `ollama pull gpt-oss:120b` (또는 `setting.conf`의 `MODEL_ID` 수정)
+
+### Installation
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 1. ETL — 원본 문서 변환
+`files/` 디렉토리에 원본 문서(PDF, DOCX, XLSX 등)를 배치한 후 실행:
+```bash
+python document_etl_pipeline.py
+```
+`processed_md/` 디렉토리에 Markdown 변환본이 생성됩니다.
+
+### 2. 메타데이터 카탈로그 빌드 (웹 UI 실행 전 필수)
+```bash
+python md_catalog_builder.py
+```
+프로젝트 루트에 `file_catalog.json`이 생성됩니다. **이 파일이 없으면 웹 UI가 정상 동작하지 않습니다.**
+
+### 3. 웹 UI 실행
+```bash
+python web_gui.py
+```
+`http://localhost:7860`에서 접속하거나, 콘솔에 출력되는 공개 URL(share 링크)을 사용합니다.
+
+---
+
 ## System Engineering & Stability
 
 * **Crash-safe State Management:** Executes synchronous state saves immediately after processing each file, ensuring zero data loss and instant resume capability.
@@ -46,6 +81,25 @@ Executes full-text search on filtered documents and generates the final response
 - **NLP / Retrieval:** Kiwipiepy (Kiwi), Rank-BM25
 - **ETL:** Docling, EasyOCR, Pandas
 - **Frontend:** Gradio 5.x
+
+---
+
+## Usage
+
+### 질의하기
+입력창에 한국어로 자연어 질문을 입력하고 Enter 또는 **실행** 버튼을 누릅니다. 예시 질문 버튼을 클릭하면 자동으로 입력됩니다.
+
+파이프라인은 두 단계로 동작합니다:
+1. **Stage 1 — 아젠틱 라우터:** 질문에서 연도·월 파라미터를 추출하고, 9,000개+ 문서 카탈로그를 대상 서브셋으로 필터링합니다.
+2. **Stage 2 — BM25 + RAG:** 필터링된 서브셋에 형태소 분석 기반 BM25를 적용해 Top-K 문서를 선별하고, LLM 답변을 스트리밍으로 생성합니다.
+
+우측 패널에서 라우팅 파라미터, 소요 시간, 참조 문서 목록을 확인할 수 있습니다.
+
+### 생성 중단
+**중지** 버튼을 클릭하면 진행 중인 LLM 생성이 즉시 중단됩니다.
+
+### 세션 초기화
+**세션 초기화** 버튼으로 채팅 히스토리를 지우고 새 세션을 시작합니다.
 
 ---
 
