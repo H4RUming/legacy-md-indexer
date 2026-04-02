@@ -203,11 +203,32 @@ class OllamaFallbackRouter:
         if match:
             json_str = match.group(0)
             try:
-                return json.loads(json_str)
+                # strict=False allows unescaped control chars like \n inside strings
+                return json.loads(json_str, strict=False)
             except json.JSONDecodeError as e:
                 logger_t2.error(f"JSON decode 에러: {e} | Raw: {json_str[:150]}")
         else:
             logger_t2.error(f"JSON 패턴 매칭 실패 | Raw: {clean_text[:150]}")
+            
+        # Fallback: Regex extraction if JSON parsing completely fails
+        try:
+            result = {}
+            dt_match = re.search(r'"doc_type"\s*:\s*"([^"]+)"', clean_text)
+            if dt_match: result["doc_type"] = dt_match.group(1)
+            else: result["doc_type"] = None
+            
+            y_match = re.search(r'"year"\s*:\s*(\d{4})', clean_text)
+            if y_match: result["year"] = int(y_match.group(1))
+            else: result["year"] = None
+            
+            m_match = re.search(r'"month"\s*:\s*(\d{1,2})', clean_text)
+            if m_match: result["month"] = int(m_match.group(1))
+            else: result["month"] = None
+            
+            if any(v is not None for v in result.values()):
+                return result
+        except Exception:
+            pass
             
         return {}
 
@@ -219,7 +240,7 @@ class OllamaFallbackRouter:
             "format": "json",
             "options": {
                 "temperature": 0.1,
-                "num_ctx": 2048
+                "num_ctx": 4096
             }
         }
         try:
@@ -249,17 +270,14 @@ class OllamaFallbackRouter:
 
             try:
                 raw_text = fpath.read_text(encoding='utf-8')
-                trunc_text = raw_text[:3000]
+                trunc_text = raw_text[:2000] # Context Window 초과 방지를 위해 길이 축소
             except Exception as e:
                 logger_t2.error(f"파일 읽기 실패 [{key}]: {e}")
                 continue
 
-            prompt = f"""다음 문서의 내용을 파악하여 doc_type, year, month를 추출하라.
-알 수 없는 항목은 null로 처리할 것.
-반드시 아래 JSON 포맷으로만 응답하라. 설명은 생략한다.
-
-[포맷]
-{{"doc_type": "string", "year": "int", "month": "int"}}
+            prompt = f"""다음 문서의 내용을 파악하여 doc_type, year, month를 추출하라. 알 수 없는 항목은 null로 처리할 것.
+반드시 JSON 포맷으로만 응답하고, 마크다운 기호나 추가 설명은 절대 포함하지 마라.
+응답 예시: {{"doc_type": "보고서", "year": 2024, "month": 11}}
 
 [문서내용]
 {trunc_text}"""

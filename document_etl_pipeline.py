@@ -23,10 +23,23 @@ from tqdm import tqdm
 
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from docling.datamodel.pipeline_options import PdfPipelineOptions, EasyOcrOptions
-from docling.datamodel.base_models import InputFormat
+from docling.datamodel.base_models import InputFormat, ConversionStatus
 
 import traceback
 import zipfile
+
+# --- openpyxl 몽키패치 ---
+# 엑셀 파일 내 잘못된 '인쇄 제목(Print_Titles)' 포맷으로 인한 openpyxl 크래시 방지
+from openpyxl.worksheet.print_settings import PrintTitles
+_orig_print_titles_from_string = PrintTitles.from_string
+@classmethod
+def _safe_print_titles_from_string(cls, value):
+    try:
+        return _orig_print_titles_from_string(value)
+    except ValueError:
+        return cls()
+PrintTitles.from_string = _safe_print_titles_from_string
+# -------------------------
 
 # 전역 로거 세팅
 logger = logging.getLogger("RAG_ETL")
@@ -118,6 +131,15 @@ def _init_worker():
     """워커 프로세스 초기화 시 엔진 로드 방지 (지연 로딩 활용)"""
     global _worker_converter
     _worker_converter = None
+    
+    import warnings
+    warnings.filterwarnings("ignore", category=UserWarning)
+    
+    # docling 등 기타 라이브러리의 불필요한 로그 억제
+    import logging
+    for name in logging.root.manager.loggerDict:
+        if name != "RAG_ETL":
+            logging.getLogger(name).setLevel(logging.CRITICAL)
 
 def _process_route(args):
     """multiprocessing.Pool에서 호출하기 위한 최상위 경로 함수"""
@@ -169,7 +191,12 @@ class DocumentETL:
                 _worker_converter = DocumentETL._build_engine_static(allowed_formats)
 
             logger.debug(f"처리 시작: {fpath.name}")
-            res = _worker_converter.convert(fpath)
+            res = _worker_converter.convert(fpath, raises_on_error=False)
+            
+            if res.status not in (ConversionStatus.SUCCESS, ConversionStatus.PARTIAL_SUCCESS):
+                logger.error(f"Parse failed [{fpath.name}]: Document conversion failed with status {res.status.value}")
+                return None
+
             md_text = res.document.export_to_markdown()
             
             out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -182,8 +209,8 @@ class DocumentETL:
             return out_path
             
         except Exception as e:
-            # 에러 Traceback 전체 출력
-            logger.error(f"Parse failed [{fpath.name}]: {e}\n{traceback.format_exc()}")
+            # 에러 Traceback 생략 및 간결한 로깅
+            logger.error(f"Parse failed [{fpath.name}]: {e}")
             return None
 
     def execute(self) -> None:
