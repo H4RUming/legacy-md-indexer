@@ -7,6 +7,8 @@ Description:
     - 다크 엔터프라이즈 테마 + 파이프라인 상태 인디케이터
 """
 
+import os
+import hashlib
 import logging
 import gradio as gr
 import json
@@ -24,6 +26,48 @@ ch.setFormatter(logging.Formatter('[%(levelname)s] %(asctime)s - %(message)s', '
 logger.addHandler(ch)
 
 LOG_FILE_PATH = Path("./interaction_logs.json")
+USERS_FILE = Path("./users.json")
+
+# ── User Management ──────────────────────────────────────────────────────────
+def load_users():
+    if not USERS_FILE.exists():
+        return {}
+    try:
+        with open(USERS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_users(users):
+    with open(USERS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(users, f, ensure_ascii=False, indent=2)
+
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def register_user(username, password, rank):
+    if not username or not password:
+        return "아이디와 비밀번호를 입력하세요."
+    users = load_users()
+    if username in users:
+        return "이미 존재하는 아이디입니다."
+    
+    users[username] = {
+        "password": hash_password(password),
+        "rank": rank
+    }
+    save_users(users)
+    return "회원가입 완료. 로그인 탭에서 진행해주세요."
+
+def login_user(username, password):
+    users = load_users()
+    if username not in users:
+        return False, "존재하지 않는 아이디입니다.", ""
+    
+    if users[username]["password"] != hash_password(password):
+        return False, "비밀번호 불일치.", ""
+        
+    return True, f"{username}님 (권한: {users[username]['rank']})", users[username]["rank"]
 
 # ── CSS: Dark Enterprise Theme ────────────────────────────────────────────────
 custom_css = """
@@ -356,9 +400,9 @@ class IntegratedRAGEngine:
         except Exception as e:
             logger.error(f"Log write fail: {e}")
 
-    def route_query(self, query: str):
+    def route_query(self, query: str, user_rank: str = "hi_rank"):
         start_t = time.time()
-        route_res = self.router.route_query(query)
+        route_res = self.router.route_query(query, user_rank=user_rank)
         return route_res, time.time() - start_t
 
 
@@ -399,40 +443,58 @@ def build_gradio_ui():
             <span class='badge'>Prototype v0.1</span>
         </div>
         """)
+        
+        user_rank_state = gr.State("low_rank")
+        
+        with gr.Column(visible=True) as auth_view:
+            gr.Markdown("## 🔐 로그인 및 권한 설정")
+            with gr.Tab("로그인"):
+                login_user_input = gr.Textbox(label="아이디")
+                login_pw_input = gr.Textbox(label="비밀번호", type="password")
+                login_btn = gr.Button("로그인", variant="primary")
+                login_msg = gr.Markdown("")
+            
+            with gr.Tab("회원가입 (테스트)"):
+                reg_user_input = gr.Textbox(label="아이디")
+                reg_pw_input = gr.Textbox(label="비밀번호", type="password")
+                reg_rank_input = gr.Radio(["low_rank", "hi_rank"], label="권한 선택", value="low_rank")
+                reg_btn = gr.Button("회원가입")
+                reg_msg = gr.Markdown("")
 
-        with gr.Row():
-            # ── 좌측: 채팅 ──────────────────────────────────────────────
-            with gr.Column(scale=7):
-                chatbot = gr.Chatbot(height=580, show_label=False)
-                with gr.Row():
-                    msg_input = gr.Textbox(
-                        show_label=False,
-                        placeholder="질의 입력 (Enter로 실행)",
-                        container=False,
-                        scale=7,
+        with gr.Column(visible=False) as main_view:
+            with gr.Row():
+                # ── 좌측: 채팅 ──────────────────────────────────────────────
+                with gr.Column(scale=7):
+                    chatbot = gr.Chatbot(height=580, show_label=False)
+                    with gr.Row():
+                        msg_input = gr.Textbox(
+                            show_label=False,
+                            placeholder="질의 입력 (Enter로 실행)",
+                            container=False,
+                            scale=7,
+                        )
+                        submit_btn = gr.Button("실행", variant="primary", scale=1)
+                        stop_btn   = gr.Button("중지", variant="stop",    scale=1, interactive=True)
+
+                    gr.Examples(examples=example_queries, inputs=msg_input, label="예시 질문")
+                    gr.ClearButton([msg_input, chatbot], value="세션 초기화", size="sm")
+
+                # ── 우측: 정보 패널 ─────────────────────────────────────────
+                with gr.Column(scale=3):
+                    gr.HTML(value=arch_info_html)
+
+                    status_display = gr.HTML(
+                        value=_status_idle(),
                     )
-                    submit_btn = gr.Button("실행", variant="primary", scale=1)
-                    stop_btn   = gr.Button("중지", variant="stop",    scale=1, interactive=True)
 
-                gr.Examples(examples=example_queries, inputs=msg_input, label="예시 질문")
-                gr.ClearButton([msg_input, chatbot], value="세션 초기화", size="sm")
+                    stats_display = gr.HTML(
+                        value=_stats_empty(),
+                    )
 
-            # ── 우측: 정보 패널 ─────────────────────────────────────────
-            with gr.Column(scale=3):
-                gr.HTML(value=arch_info_html)
-
-                status_display = gr.HTML(
-                    value=_status_idle(),
-                )
-
-                stats_display = gr.HTML(
-                    value=_stats_empty(),
-                )
-
-                gr.HTML("<div class='panel-label' style='margin-top:14px;'>참조 문서 리스트</div>")
-                source_display = gr.HTML(
-                    value="<div class='source-panel'><div class='source-empty'>질의 실행 시 결과가 표출됩니다.</div></div>",
-                )
+                    gr.HTML("<div class='panel-label' style='margin-top:14px;'>참조 문서 리스트</div>")
+                    source_display = gr.HTML(
+                        value="<div class='source-panel'><div class='source-empty'>질의 실행 시 결과가 표출됩니다.</div></div>",
+                    )
 
         # ── State ────────────────────────────────────────────────────────
         msg_query_state  = gr.State()
@@ -440,12 +502,33 @@ def build_gradio_ui():
         route_dur_state  = gr.State()
 
         # ── Event Functions ───────────────────────────────────────────────
+        def do_login(user, pw):
+            success, msg, rank = login_user(user, pw)
+            if success:
+                return gr.update(visible=False), gr.update(visible=True), rank, msg
+            return gr.update(visible=True), gr.update(visible=False), "low_rank", msg
+
+        login_btn.click(
+            do_login, 
+            inputs=[login_user_input, login_pw_input], 
+            outputs=[auth_view, main_view, user_rank_state, login_msg]
+        )
+        
+        def do_register(user, pw, rank):
+            return register_user(user, pw, rank)
+            
+        reg_btn.click(
+            do_register, 
+            inputs=[reg_user_input, reg_pw_input, reg_rank_input], 
+            outputs=[reg_msg]
+        )
+
         def user_interaction(user_message, history):
             history = history or []
             history.append({"role": "user", "content": user_message})
             return "", history
 
-        def bot_interaction_route(history):
+        def bot_interaction_route(history, user_rank):
             """제너레이터: 라우팅 시작 전 스피너 즉시 표시"""
             if not history or history[-1]["role"] != "user":
                 yield history, _status_idle(), {}, 0, ""
@@ -464,7 +547,7 @@ def build_gradio_ui():
             yield history, _status_stage1(), {}, 0, query
 
             # 블로킹 라우팅 실행
-            route_res, route_duration = engine.route_query(query)
+            route_res, route_duration = engine.route_query(query, user_rank)
             target_count = len(route_res.get("target_files", []))
             yield history, _status_stage1_done(route_duration, target_count), route_res, route_duration, query
 
@@ -521,7 +604,7 @@ def build_gradio_ui():
             )
             .then(
                 bot_interaction_route,
-                [chatbot],
+                [chatbot, user_rank_state],
                 [chatbot, status_display, route_res_state, route_dur_state, msg_query_state],
                 queue=True,
                 show_progress="hidden",
@@ -544,7 +627,7 @@ def build_gradio_ui():
             )
             .then(
                 bot_interaction_route,
-                [chatbot],
+                [chatbot, user_rank_state],
                 [chatbot, status_display, route_res_state, route_dur_state, msg_query_state],
                 queue=True,
                 show_progress="hidden",

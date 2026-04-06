@@ -89,7 +89,7 @@ class AgenticRouter:
             logger.error(f"Param extract err: {e}")
             return {"years": [], "months": [], "search_query": query}
 
-    def _filter_catalog(self, params: dict) -> List[str]:
+    def _filter_catalog(self, params: dict, user_rank: str = "hi_rank") -> List[str]:
         target_years = params.get("years") or []
         target_months = params.get("months") or []
         
@@ -97,6 +97,10 @@ class AgenticRouter:
 
         for file_path, meta in self.catalog.items():
             if meta.get("status") != "COMPLETED":
+                continue
+
+            # 권한 체크: low_rank 유저는 low_rank/ 경로의 파일만 접근 가능
+            if user_rank == "low_rank" and "low_rank/" not in file_path:
                 continue
 
             year = meta.get("year")
@@ -112,14 +116,14 @@ class AgenticRouter:
 
         return filtered_files
 
-    def route_query(self, raw_query: Any) -> Dict[str, Any]:
+    def route_query(self, raw_query: Any, user_rank: str = "hi_rank") -> Dict[str, Any]:
         clean_q = self._clean_query(raw_query)
-        logger.info(f"Query: {clean_q}")
+        logger.info(f"Query: {clean_q} (Rank: {user_rank})")
         
         params = self._extract_parameters(clean_q)
         logger.info(f"Extracted params: {params}")
 
-        target_files = self._filter_catalog(params)
+        target_files = self._filter_catalog(params, user_rank)
         
         # OOM 방어
         MAX_DOCS = 500 

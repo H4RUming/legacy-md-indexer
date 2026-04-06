@@ -27,6 +27,8 @@ from docling.datamodel.base_models import InputFormat, ConversionStatus
 
 import traceback
 import zipfile
+import openpyxl
+import xml.etree.ElementTree as ET
 
 # --- openpyxl 몽키패치 ---
 # 엑셀 파일 내 잘못된 '인쇄 제목(Print_Titles)' 포맷으로 인한 openpyxl 크래시 방지
@@ -60,7 +62,7 @@ class ETLConfig:
     output_dir: Path
     # VRAM/RAM OOM 방지
     max_workers: int = 4
-    target_exts: Set[str] = field(default_factory=lambda: {'.pdf', '.docx', '.pptx', '.xlsx'})
+    target_exts: Set[str] = field(default_factory=lambda: {'.pdf', '.docx', '.pptx', '.xlsx', '.hwpx'})
     skip_exts: Set[str] = field(default_factory=lambda: {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp'})
     allowed_formats: List[InputFormat] = field(
         default_factory=lambda: [InputFormat.PDF, InputFormat.DOCX, InputFormat.PPTX, InputFormat.XLSX]
@@ -141,6 +143,88 @@ def _init_worker():
         if name != "RAG_ETL":
             logging.getLogger(name).setLevel(logging.CRITICAL)
 
+def _xlsx_to_markdown(fpath: Path) -> str:
+    """openpyxl을 이용해 모든 시트를 마크다운으로 변환"""
+    wb = openpyxl.load_workbook(fpath, data_only=True)
+    parts = []
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        # 비어있지 않은 행만 수집
+        rows = []
+        for row in ws.iter_rows(values_only=True):
+            if all(v is None for v in row):
+                continue
+            rows.append(row)
+        if not rows:
+            continue
+
+        parts.append(f"## {sheet_name}\n")
+
+        # 모든 행 중 최대 열 수 산정 (헤더 행이 가장 짧을 수도 있음)
+        max_cols = max(len(r) for r in rows)
+
+        def cell_str(v) -> str:
+            s = "" if v is None else str(v)
+            return s.replace("|", "\\|").replace("\n", " ").replace("\r", "")
+
+        header = [cell_str(v) for v in rows[0]]
+        # 헤더 열 수가 max_cols보다 적으면 패딩
+        while len(header) < max_cols:
+            header.append("")
+
+        parts.append("| " + " | ".join(header) + " |")
+        parts.append("| " + " | ".join(["---"] * max_cols) + " |")
+
+        for row in rows[1:]:
+            cells = [cell_str(v) for v in row]
+            while len(cells) < max_cols:
+                cells.append("")
+            parts.append("| " + " | ".join(cells) + " |")
+
+        parts.append("")
+    wb.close()
+    return "\n".join(parts)
+
+
+def _hwpx_to_markdown(fpath: Path) -> str:
+    """HWPX(ZIP+XML) 파일의 모든 섹션에서 텍스트를 추출해 마크다운으로 변환"""
+    # Hancom XML 네임스페이스
+    HP_NS = "http://www.hancom.co.kr/hwpml/2012/paragraph"
+    HP_T = f"{{{HP_NS}}}t"
+    HP_P = f"{{{HP_NS}}}p"
+
+    parts = []
+    with zipfile.ZipFile(fpath, 'r') as zf:
+        # Contents/section*.xml 파일만 정렬하여 순서대로 처리
+        section_files = sorted(
+            [n for n in zf.namelist() if n.startswith("Contents/section") and n.endswith(".xml")]
+        )
+        if not section_files:
+            # 네임스페이스 없이 텍스트 태그를 직접 탐색 (fallback)
+            section_files = sorted(
+                [n for n in zf.namelist() if "section" in n and n.endswith(".xml")]
+            )
+
+        for sec_name in section_files:
+            try:
+                xml_bytes = zf.read(sec_name)
+                root = ET.fromstring(xml_bytes)
+            except ET.ParseError as e:
+                logger.warning(f"HWPX XML 파싱 실패 [{fpath.name}/{sec_name}]: {e}")
+                continue
+
+            for para in root.iter(HP_P):
+                line_parts = []
+                for t_elem in para.iter(HP_T):
+                    if t_elem.text:
+                        line_parts.append(t_elem.text)
+                line = "".join(line_parts).strip()
+                if line:
+                    parts.append(line)
+
+    return "\n\n".join(parts)
+
+
 def _process_route(args):
     """multiprocessing.Pool에서 호출하기 위한 최상위 경로 함수"""
     fpath, input_dir, output_dir, allowed_formats = args
@@ -186,18 +270,34 @@ class DocumentETL:
             if out_path.exists():
                 return out_path
 
-            # 개별 워커 프로세스에서 엔진 최초 1회 로드
-            if _worker_converter is None:
-                _worker_converter = DocumentETL._build_engine_static(allowed_formats)
+            ext = fpath.suffix.lower()
+            # XLSX는 openpyxl로 직접 변환 (모든 시트 처리)
+            if ext == '.xlsx':
+                logger.debug(f"처리 시작 (XLSX/openpyxl): {fpath.name}")
+                md_text = _xlsx_to_markdown(fpath)
+                if not md_text.strip():
+                    logger.error(f"Parse failed [{fpath.name}]: XLSX 내용 없음")
+                    return None
+            # HWPX는 ZIP+XML 직접 파싱
+            elif ext == '.hwpx':
+                logger.debug(f"처리 시작 (HWPX): {fpath.name}")
+                md_text = _hwpx_to_markdown(fpath)
+                if not md_text.strip():
+                    logger.error(f"Parse failed [{fpath.name}]: HWPX 내용 없음")
+                    return None
+            else:
+                # 개별 워커 프로세스에서 엔진 최초 1회 로드
+                if _worker_converter is None:
+                    _worker_converter = DocumentETL._build_engine_static(allowed_formats)
 
-            logger.debug(f"처리 시작: {fpath.name}")
-            res = _worker_converter.convert(fpath, raises_on_error=False)
-            
-            if res.status not in (ConversionStatus.SUCCESS, ConversionStatus.PARTIAL_SUCCESS):
-                logger.error(f"Parse failed [{fpath.name}]: Document conversion failed with status {res.status.value}")
-                return None
+                logger.debug(f"처리 시작: {fpath.name}")
+                res = _worker_converter.convert(fpath, raises_on_error=False)
 
-            md_text = res.document.export_to_markdown()
+                if res.status not in (ConversionStatus.SUCCESS, ConversionStatus.PARTIAL_SUCCESS):
+                    logger.error(f"Parse failed [{fpath.name}]: Document conversion failed with status {res.status.value}")
+                    return None
+
+                md_text = res.document.export_to_markdown()
             
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(md_text, encoding="utf-8")

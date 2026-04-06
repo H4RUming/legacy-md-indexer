@@ -15,7 +15,7 @@ import logging
 import requests
 import configparser
 from pathlib import Path
-from typing import Dict, Tuple, Optional
+from typing import Dict, List, Tuple, Optional
 from tqdm import tqdm
 
 # 로거 셋업
@@ -45,49 +45,64 @@ class RegexFastTrack:
     """Track 1: 정규식 기반 고속 분류기"""
     def __init__(self):
         self.doc_type_patterns = [
-            r'(주간업무|업무보고|일일보고)',
+            r'(주간업무|업무보고|일일보고|일일\s*주요\s*정비사항)',
             r'(회의록|의사록)',
             r'(견적서|발주서|품의서)',
             r'(검수|정기검사)',
-            r'(계획서|기획안)'
+            r'(계획서|기획안)',
+            r'(운영\s*현황|BEP계산|월간업무보고)'
         ]
-        self.year_pattern = re.compile(r'(20\d{2})(?:년|\.|-|_|$)')
-        self.month_pattern = re.compile(r'(?:^|[^\d])(1[0-2]|[1-9])(?:월|\.|-|_|$)')
-        self.content_date_pattern = re.compile(r'작성일\s*[:]\s*(20\d{2})[\.\-년\s]+([0-1]?[0-9])[\.\-월\s]')
 
-    def process(self, file_path: Path, content_head: str) -> Dict[str, Optional[str]]:
-        year, month = self._extract_date(file_path, content_head)
+    def process(self, file_path: Path, content_head: str) -> Dict:
+        dates = self._extract_dates(file_path, content_head)
         doc_type = self._extract_doc_type(file_path)
-        
+
         return {
             "doc_type": doc_type,
-            "year": year,
-            "month": month,
-            "is_complete": bool(year and month and doc_type)
+            "dates": dates,
+            "is_complete": bool(dates and doc_type)
         }
 
-    def _extract_date(self, file_path: Path, content_head: str) -> Tuple[Optional[int], Optional[int]]:
-        year, month = None, None
-        
-        if content_head:
-            match = self.content_date_pattern.search(content_head)
-            if match:
-                return int(match.group(1)), int(match.group(2))
+    def _extract_dates(self, file_path: Path, content_head: str) -> List[Dict[str, int]]:
+        """문서에서 발견되는 모든 (year, month) 쌍을 중복 없이 반환"""
+        found: List[Tuple[int, int]] = []
 
-        for part in file_path.parts[::-1]:
-            clean_part = part.replace(' ', '')
-            if not year:
-                y_match = self.year_pattern.search(clean_part)
-                if y_match: year = int(y_match.group(1))
-            
-            if not month:
-                m_match = self.month_pattern.search(clean_part)
-                if m_match: month = int(m_match.group(1))
-            
-            if year and month:
-                break
-                
-        return year, month
+        def _to_year(val: int) -> int:
+            return val if val >= 2000 else 2000 + val
+
+        def _add(y: int, m: int):
+            entry = (_to_year(y), m)
+            if entry not in found:
+                found.append(entry)
+
+        filename = file_path.name
+        date_patterns = [
+            r'(?<!\d)((?:20)?\d{2})[-_.\s](1[0-2]|0?[1-9])[-_.\s](3[01]|[12]\d|0?[1-9])(?!\d)',
+            r'(?<!\d)((?:20)?\d{2})(1[0-2]|0[1-9])(3[01]|[12]\d|0[1-9])(?!\d)'
+        ]
+        for pattern in date_patterns:
+            for m in re.finditer(pattern, filename):
+                _add(int(m.group(1)), int(m.group(2)))
+
+        # 경로/파일명의 XX년 YY월 패턴
+        path_str = str(file_path).replace(' ', '')
+        y_matches = list(re.finditer(r'((?:20)?\d{2})년', path_str))
+        m_matches = list(re.finditer(r'(1[0-2]|0?[1-9])월', path_str))
+        if y_matches and m_matches:
+            _add(int(y_matches[0].group(1)), int(m_matches[0].group(1)))
+
+        # 문서 본문 전체에서 날짜 패턴 탐색
+        if content_head:
+            body_patterns = [
+                r'(?:작성일|일자|보고일|기준일|보고월)\s*[:\s]*((?:20)?\d{2})[\.\-년\s/]+(1[0-2]|0?[1-9])[\.\-월\s/]+',
+                r'(?<!\d)((?:20)?\d{2})[\.\-/]\s*(1[0-2]|0?[1-9])[\.\-/]\s*(3[01]|[12]\d|0?[1-9])(?!\d)',
+                r'((?:20)?\d{2})년\s*(1[0-2]|0?[1-9])월',
+            ]
+            for pattern in body_patterns:
+                for m in re.finditer(pattern, content_head):
+                    _add(int(m.group(1)), int(m.group(2)))
+
+        return [{"year": y, "month": mo} for y, mo in found]
 
     def _extract_doc_type(self, file_path: Path) -> Optional[str]:
         full_path_str = str(file_path).replace(' ', '')
@@ -153,8 +168,7 @@ class CatalogBuilder:
                 self.catalog[file_key] = {
                     "status": "COMPLETED",
                     "doc_type": meta["doc_type"],
-                    "year": meta["year"],
-                    "month": meta["month"],
+                    "dates": meta["dates"],
                     "source": "Track1"
                 }
                 track1_hit += 1
@@ -214,42 +228,60 @@ class OllamaFallbackRouter:
         try:
             result = {}
             dt_match = re.search(r'"doc_type"\s*:\s*"([^"]+)"', clean_text)
-            if dt_match: result["doc_type"] = dt_match.group(1)
-            else: result["doc_type"] = None
-            
-            y_match = re.search(r'"year"\s*:\s*(\d{4})', clean_text)
-            if y_match: result["year"] = int(y_match.group(1))
-            else: result["year"] = None
-            
-            m_match = re.search(r'"month"\s*:\s*(\d{1,2})', clean_text)
-            if m_match: result["month"] = int(m_match.group(1))
-            else: result["month"] = None
-            
-            if any(v is not None for v in result.values()):
+            result["doc_type"] = dt_match.group(1) if dt_match else None
+
+            dates = []
+            for ym in re.finditer(r'"year"\s*:\s*(\d{4})[^}]*?"month"\s*:\s*(\d{1,2})', clean_text):
+                dates.append({"year": int(ym.group(1)), "month": int(ym.group(2))})
+            result["dates"] = dates
+
+            if result["doc_type"] or dates:
                 return result
         except Exception:
             pass
-            
+
         return {}
 
-    def _call_ollama(self, prompt: str) -> str:
+    def _call_ollama(self, prompt: str, system_prompt: str = "") -> str:
         payload = {
             "model": self.model_id,
             "prompt": prompt,
+            "system": system_prompt,
             "stream": False,
-            "format": "json",
+            "format": {
+                "type": "object",
+                "properties": {
+                    "doc_type": {"type": ["string", "null"]},
+                    "dates": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "year": {"type": "integer"},
+                                "month": {"type": "integer"}
+                            }
+                        }
+                    }
+                },
+                "required": ["doc_type", "dates"]
+            },
             "options": {
                 "temperature": 0.1,
                 "num_ctx": 4096
             }
         }
-        try:
-            res = requests.post(self.api_url, json=payload, timeout=120)
-            res.raise_for_status()
-            return res.json().get("response", "")
-        except requests.exceptions.RequestException as e:
-            logger_t2.error(f"Ollama API Error: {e}")
-            return ""
+        for attempt in range(3):
+            try:
+                res = requests.post(self.api_url, json=payload, timeout=300)
+                res.raise_for_status()
+                return res.json().get("response", "")
+            except requests.exceptions.RequestException as e:
+                logger_t2.warning(f"Ollama API Error (Attempt {attempt+1}/3): {e}")
+                if attempt == 2:
+                    logger_t2.error(f"Ollama API completely failed: {e}")
+                    return ""
+                time.sleep(2)
+        return ""
 
     def run(self):
         pending_keys = [k for k, v in self.catalog.items() if v.get("status") == "PENDING_LLM"]
@@ -275,14 +307,15 @@ class OllamaFallbackRouter:
                 logger_t2.error(f"파일 읽기 실패 [{key}]: {e}")
                 continue
 
-            prompt = f"""다음 문서의 내용을 파악하여 doc_type, year, month를 추출하라. 알 수 없는 항목은 null로 처리할 것.
+            system_prompt = "You are a data extraction bot. You must extract doc_type and all dates mentioned. You must output ONLY a valid JSON object. Do not output any conversational text or explanation."
+            prompt = f"""다음 문서에서 doc_type과 문서에 등장하는 모든 날짜(year/month)를 추출하라. 알 수 없는 항목은 null 또는 빈 배열로 처리할 것.
 반드시 JSON 포맷으로만 응답하고, 마크다운 기호나 추가 설명은 절대 포함하지 마라.
-응답 예시: {{"doc_type": "보고서", "year": 2024, "month": 11}}
+응답 예시: {{"doc_type": "보고서", "dates": [{{"year": 2024, "month": 3}}, {{"year": 2024, "month": 4}}]}}
 
 [문서내용]
 {trunc_text}"""
 
-            res_text = self._call_ollama(prompt)
+            res_text = self._call_ollama(prompt, system_prompt=system_prompt)
             if not res_text:
                 self.catalog[key]["status"] = "ERROR"
                 self._dump_catalog()
@@ -291,11 +324,18 @@ class OllamaFallbackRouter:
             parsed_data = self._extract_json(res_text)
             
             if parsed_data:
+                partial_meta = self.catalog[key].get("partial_meta", {})
+                # Track 1에서 찾은 날짜 + Ollama가 추가로 찾은 날짜를 병합 (중복 제거)
+                existing_dates = partial_meta.get("dates", [])
+                ollama_dates = parsed_data.get("dates") or []
+                merged = existing_dates[:]
+                for d in ollama_dates:
+                    if d not in merged:
+                        merged.append(d)
                 self.catalog[key].update({
                     "status": "COMPLETED",
                     "doc_type": parsed_data.get("doc_type"),
-                    "year": parsed_data.get("year"),
-                    "month": parsed_data.get("month"),
+                    "dates": merged,
                     "source": "Track2_Ollama"
                 })
                 # 진행률 바와 겹치지 않게 로그 출력을 제어하려면 logger.info 대신 tqdm.write 사용 권장
