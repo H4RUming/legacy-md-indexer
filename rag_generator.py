@@ -46,14 +46,18 @@ class RAGGenerator:
         tokens = self.kiwi.tokenize(text)
         return [t.form for t in tokens if not t.tag.startswith('J') and not t.tag.startswith('S')]
 
-    def _retrieve_bm25(self, query: str, file_paths: List[str]) -> List[Dict[str, Any]]:
+    def _retrieve_bm25(self, query: str, file_paths: List[str],
+                       catalog: Dict = None, params: Dict = None) -> List[Dict[str, Any]]:
         docs = []
         valid_paths = []
-        
+
         for path in file_paths:
             fpath = self.target_dir / path
             if fpath.exists():
-                docs.append(fpath.read_text(encoding='utf-8'))
+                content = fpath.read_text(encoding='utf-8')
+                if not content.strip():
+                    continue
+                docs.append(content)
                 valid_paths.append(path)
             else:
                 logger.warning(f"File not found: {path}")
@@ -64,13 +68,27 @@ class RAGGenerator:
         logger.info(f"Calc BM25 scores for {len(docs)} docs")
         tokenized_docs = [self._tokenize(doc) for doc in docs]
         bm25 = BM25Okapi(tokenized_docs)
-        
+
         tokenized_query = self._tokenize(query)
         scores = bm25.get_scores(tokenized_query)
 
+        # 날짜 매칭 문서에 스코어 부스트 적용
+        if catalog and params:
+            target_years = set(params.get("years") or [])
+            target_months = set(params.get("months") or [])
+            if target_years or target_months:
+                for i, path in enumerate(valid_paths):
+                    meta = catalog.get(path, {})
+                    for d in meta.get("dates", []):
+                        y, m = d.get("year"), d.get("month")
+                        if (target_years and y in target_years) or \
+                           (target_months and m in target_months):
+                            scores[i] *= 1.3
+                            break
+
         # Sort desc
         top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:self.top_k]
-        
+
         results = []
         for idx in top_indices:
             if scores[idx] > 0.0:
@@ -78,23 +96,35 @@ class RAGGenerator:
                     "file_path": valid_paths[idx],
                     "score": round(float(scores[idx]), 4)
                 })
-                
+
         logger.info(f"BM25 retrieve done. Selected: {len(results)} ea")
         return results
 
-    def _load_context(self, target_files: List[Dict]) -> str:
+    def _load_context(self, target_files: List[Dict], catalog: Dict = None) -> str:
         context_blocks = []
         current_len = 0
-        
+
         for item in target_files:
             file_path = item["file_path"]
             fpath = self.target_dir / file_path
-            
+
             if not fpath.exists():
                 continue
-                
+
             text = fpath.read_text(encoding='utf-8')
-            block = f"--- [Doc: {file_path}] ---\n{text}\n\n"
+
+            # 날짜 메타 주입 (LLM이 시계열 맥락 인식)
+            date_str = ""
+            if catalog:
+                meta = catalog.get(file_path, {})
+                dates = meta.get("dates", [])
+                valid = [f"{d['year']}-{d['month']:02d}" for d in dates
+                         if d.get("year") and d.get("month")
+                         and 1990 <= d["year"] <= 2030 and 1 <= d["month"] <= 12]
+                if valid:
+                    date_str = f" | Dates: {', '.join(valid)}"
+
+            block = f"--- [Doc: {file_path}{date_str}] ---\n{text}\n\n"
             
             if current_len + len(block) > self.max_char_limit:
                 allowed_len = self.max_char_limit - current_len
@@ -108,7 +138,9 @@ class RAGGenerator:
                 
         return "".join(context_blocks)
 
-    def generate_stream(self, query: str, target_files: Union[List[str], List[Dict]], search_query: str = None) -> Generator[Dict[str, Any], None, None]:
+    def generate_stream(self, query: str, target_files: Union[List[str], List[Dict]],
+                        search_query: str = None, catalog: Dict = None,
+                        params: Dict = None) -> Generator[Dict[str, Any], None, None]:
         if not target_files:
             yield {"answer": "조건에 부합하는 문서가 없어 답변할 수 없습니다.", "references": []}
             return
@@ -116,13 +148,14 @@ class RAGGenerator:
         bm25_targets = target_files
         if isinstance(target_files[0], str):
             bm25_query = search_query if search_query else query
-            bm25_targets = self._retrieve_bm25(bm25_query, target_files)
+            bm25_targets = self._retrieve_bm25(bm25_query, target_files,
+                                                catalog=catalog, params=params)
 
         if not bm25_targets:
             yield {"answer": "본문 내에 일치하는 내용이 존재하지 않습니다.", "references": []}
             return
 
-        context = self._load_context(bm25_targets)
+        context = self._load_context(bm25_targets, catalog=catalog)
         logger.info(f"Context loaded. Length: {len(context)} chars")
         
         prompt = f"""다음 제공된 [Context] 문서들만 참고해서 [Query]에 대한 답변 작성.

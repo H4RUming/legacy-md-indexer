@@ -47,15 +47,15 @@ class AgenticRouter:
         # keyword 제거, search_query(BM25용) 추가
         prompt = f"""
         질문 분석 후 JSON 응답.
-        
+
         [조건]
         - years: 연도 (list of int). 현재 {current_year}년 기준. (예: 최근 2년 -> [2025, 2026])
-        - months: 월 (list of int). 조건 없으면 []
-        - search_query: 본문 검색용 질의어 (string)
-        
+        - months: 월 (list of int). 범위 질의는 모든 월을 나열 (예: 3월~6월 -> [3, 4, 5, 6]). 조건 없으면 []
+        - search_query: 본문 검색용 질의어 (string). 연도/월을 제외한 핵심 키워드만 추출
+
         [질문]
         "{query}"
-        
+
         [출력]
         {{"years": [2025, 2026], "months": [], "search_query": "엘리베이터 수리 내역"}}
         """
@@ -71,20 +71,26 @@ class AgenticRouter:
             res = requests.post(self.api_url, json=payload, timeout=60)
             res.raise_for_status()
             res_text = res.json().get("response", "")
-            
+
             clean_text = re.sub(r'<think>.*?</think>', '', res_text, flags=re.DOTALL).strip()
             clean_text = re.sub(r'```json|```', '', clean_text).strip()
-            
+
             try:
-                return json.loads(clean_text)
+                params = json.loads(clean_text)
             except json.JSONDecodeError:
                 match = re.search(r'\{[\s\S]*\}', clean_text)
                 if match:
-                    return json.loads(match.group(0))
+                    params = json.loads(match.group(0))
                 else:
                     logger.error(f"JSON parse err. raw: {res_text}")
                     return {"years": [], "months": [], "search_query": query}
-                
+
+            # 파라미터 유효성 필터링
+            params["years"] = [y for y in (params.get("years") or []) if isinstance(y, int) and 1990 <= y <= 2030]
+            params["months"] = [m for m in (params.get("months") or []) if isinstance(m, int) and 1 <= m <= 12]
+            params.setdefault("search_query", query)
+            return params
+
         except Exception as e:
             logger.error(f"Param extract err: {e}")
             return {"years": [], "months": [], "search_query": query}
@@ -92,7 +98,7 @@ class AgenticRouter:
     def _filter_catalog(self, params: dict, user_rank: str = "hi_rank") -> List[str]:
         target_years = params.get("years") or []
         target_months = params.get("months") or []
-        
+
         filtered_files = []
 
         for file_path, meta in self.catalog.items():
@@ -103,16 +109,29 @@ class AgenticRouter:
             if user_rank == "low_rank" and "low_rank/" not in file_path:
                 continue
 
-            year = meta.get("year")
-            month = meta.get("month")
-
-            # 시간 조건만 필터링
-            if target_years and year not in target_years:
-                continue
-            if target_months and month not in target_months:
+            # 시간 조건이 없으면 모든 COMPLETED 문서 통과
+            if not target_years and not target_months:
+                filtered_files.append(file_path)
                 continue
 
-            filtered_files.append(file_path)
+            # dates 리스트 내 ANY 매칭 (유효성 검증 포함)
+            dates = meta.get("dates", [])
+            matched = False
+            for d in dates:
+                y, m = d.get("year"), d.get("month")
+                # 잘못된 날짜 엔트리 스킵
+                if y is not None and (y < 1990 or y > 2030):
+                    continue
+                if m is not None and (m < 1 or m > 12):
+                    continue
+                year_ok = (not target_years) or (y in target_years)
+                month_ok = (not target_months) or (m in target_months)
+                if year_ok and month_ok:
+                    matched = True
+                    break
+
+            if matched:
+                filtered_files.append(file_path)
 
         return filtered_files
 

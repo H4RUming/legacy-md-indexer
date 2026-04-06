@@ -376,24 +376,43 @@ class IntegratedRAGEngine:
             with open(LOG_FILE_PATH, 'w', encoding='utf-8') as f:
                 json.dump([], f)
 
-    def _log_interaction(self, query: str, params: dict, targets: list, answer: str, duration: float, status: str = "COMPLETED"):
+    def _log_interaction(self, *, username: str, user_rank: str, query: str,
+                         params: dict, filtered_files: list,
+                         bm25_references: list, answer: str,
+                         route_duration: float, gen_duration: float,
+                         status: str = "COMPLETED"):
         try:
             with open(LOG_FILE_PATH, 'r', encoding='utf-8') as f:
                 logs = json.load(f)
+
             logs.append({
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "status": status,
-                "user_query": query,
-                "process_duration_s": round(duration, 3),
-                "routing_result": {
-                    "parameters": params,
-                    "target_files_count": len(targets)
+                "user": {
+                    "username": username,
+                    "rank": user_rank,
                 },
-                "rag_result": {
+                "query": {
+                    "raw_input": query,
+                    "extracted_parameters": {
+                        "years": params.get("years", []),
+                        "months": params.get("months", []),
+                        "search_query": params.get("search_query", ""),
+                    },
+                },
+                "stage1_routing": {
+                    "duration_s": round(route_duration, 3),
+                    "filtered_files_count": len(filtered_files),
+                    "filtered_files": filtered_files,
+                },
+                "stage2_generation": {
+                    "duration_s": round(gen_duration, 3),
+                    "bm25_references": bm25_references,
                     "answer": answer,
-                    "referenced_files": targets
-                }
+                },
+                "total_duration_s": round(route_duration + gen_duration, 3),
             })
+
             with open(LOG_FILE_PATH, 'w', encoding='utf-8') as f:
                 json.dump(logs, f, ensure_ascii=False, indent=2)
             logger.info("Interaction logged")
@@ -445,6 +464,7 @@ def build_gradio_ui():
         """)
         
         user_rank_state = gr.State("low_rank")
+        username_state = gr.State("")
         
         with gr.Column(visible=True) as auth_view:
             gr.Markdown("## 🔐 로그인 및 권한 설정")
@@ -505,13 +525,13 @@ def build_gradio_ui():
         def do_login(user, pw):
             success, msg, rank = login_user(user, pw)
             if success:
-                return gr.update(visible=False), gr.update(visible=True), rank, msg
-            return gr.update(visible=True), gr.update(visible=False), "low_rank", msg
+                return gr.update(visible=False), gr.update(visible=True), rank, user, msg
+            return gr.update(visible=True), gr.update(visible=False), "low_rank", "", msg
 
         login_btn.click(
-            do_login, 
-            inputs=[login_user_input, login_pw_input], 
-            outputs=[auth_view, main_view, user_rank_state, login_msg]
+            do_login,
+            inputs=[login_user_input, login_pw_input],
+            outputs=[auth_view, main_view, user_rank_state, username_state, login_msg]
         )
         
         def do_register(user, pw, rank):
@@ -551,7 +571,7 @@ def build_gradio_ui():
             target_count = len(route_res.get("target_files", []))
             yield history, _status_stage1_done(route_duration, target_count), route_res, route_duration, query
 
-        def bot_interaction_generate(history, route_res, route_duration, query):
+        def bot_interaction_generate(history, route_res, route_duration, query, username, user_rank):
             if not history or history[-1]["role"] != "assistant":
                 yield history, _build_source_html([]), _stats_empty(), _status_idle()
                 return
@@ -566,7 +586,9 @@ def build_gradio_ui():
 
             try:
                 for rag_chunk in engine.generator.generate_stream(
-                    query, route_res["target_files"], search_query=search_q
+                    query, route_res["target_files"], search_query=search_q,
+                    catalog=engine.router.catalog,
+                    params=route_res.get("parameters", {})
                 ):
                     full_answer = rag_chunk["answer"]
                     sources     = rag_chunk["references"]
@@ -580,8 +602,13 @@ def build_gradio_ui():
                 yield history, _build_source_html(sources), final_stats, final_status
 
                 engine._log_interaction(
-                    query, route_res["parameters"], sources,
-                    full_answer, route_duration + gen_dur, "COMPLETED"
+                    username=username, user_rank=user_rank, query=query,
+                    params=route_res.get("parameters", {}),
+                    filtered_files=route_res.get("target_files", []),
+                    bm25_references=sources,
+                    answer=full_answer,
+                    route_duration=route_duration, gen_duration=gen_dur,
+                    status="COMPLETED"
                 )
 
             except Exception as e:
@@ -589,12 +616,21 @@ def build_gradio_ui():
                 history[-1]["content"] = full_answer + "\n\n[출력이 중단되었습니다.]"
                 gen_dur = time.time() - start_gen_t
                 engine._log_interaction(
-                    query, route_res.get("parameters", {}), route_res.get("target_files", []),
-                    history[-1]["content"], route_duration + gen_dur, "STOPPED"
+                    username=username, user_rank=user_rank, query=query,
+                    params=route_res.get("parameters", {}),
+                    filtered_files=route_res.get("target_files", []),
+                    bm25_references=sources,
+                    answer=history[-1]["content"],
+                    route_duration=route_duration, gen_duration=gen_dur,
+                    status="STOPPED"
                 )
                 yield history, _build_source_html(sources), _stats_empty(), _status_error(str(e))
 
         # ── Event Chain ───────────────────────────────────────────────────
+        _gen_inputs = [chatbot, route_res_state, route_dur_state, msg_query_state,
+                       username_state, user_rank_state]
+        _gen_outputs = [chatbot, source_display, stats_display, status_display]
+
         submit_event = (
             submit_btn.click(
                 user_interaction,
@@ -611,8 +647,8 @@ def build_gradio_ui():
             )
             .then(
                 bot_interaction_generate,
-                [chatbot, route_res_state, route_dur_state, msg_query_state],
-                [chatbot, source_display, stats_display, status_display],
+                _gen_inputs,
+                _gen_outputs,
                 queue=True,
                 show_progress="hidden",
             )
@@ -634,8 +670,8 @@ def build_gradio_ui():
             )
             .then(
                 bot_interaction_generate,
-                [chatbot, route_res_state, route_dur_state, msg_query_state],
-                [chatbot, source_display, stats_display, status_display],
+                _gen_inputs,
+                _gen_outputs,
                 queue=True,
                 show_progress="hidden",
             )
