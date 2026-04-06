@@ -119,14 +119,14 @@ def _load_history_html(user_rank: str, limit: int = 20) -> str:
 
 # ── CSS ──────────────────────────────────────────────────────────────────────
 custom_css = """
-:root {
+:root, [data-theme="dark"] {
     --bg-base:      #0a0f1e;
     --bg-panel:     #111827;
     --bg-card:      #1a2236;
     --bg-card-h:    #1e2a42;
     --border:       #1f2937;
     --border-light: rgba(31,41,55,0.6);
-    --accent:       #60a5fa;
+    --accent:       #3b82f6;
     --accent-dim:   rgba(96,165,250,0.15);
     --green:        #34d399;
     --green-dim:    rgba(52,211,153,0.12);
@@ -138,6 +138,74 @@ custom_css = """
     --text-s:       #94a3b8;
     --text-m:       #64748b;
     --radius:       10px;
+    --header-bg:    linear-gradient(135deg, #070c1a 0%, #0d1a33 50%, #111f3a 100%);
+    --theme-icon:   "🌙";
+}
+
+[data-theme="light"] {
+    --bg-base:      #f0f2f5;
+    --bg-panel:     #ffffff;
+    --bg-card:      #f8f9fb;
+    --bg-card-h:    #eef1f6;
+    --border:       #d1d5db;
+    --border-light: rgba(209,213,219,0.6);
+    --accent:       #2563eb;
+    --accent-dim:   rgba(37,99,235,0.10);
+    --green:        #059669;
+    --green-dim:    rgba(5,150,105,0.10);
+    --amber:        #d97706;
+    --amber-dim:    rgba(217,119,6,0.10);
+    --red:          #dc2626;
+    --red-dim:      rgba(220,38,38,0.08);
+    --text-p:       #111827;
+    --text-s:       #4b5563;
+    --text-m:       #6b7280;
+    --header-bg:    linear-gradient(135deg, #e8ecf4 0%, #dfe6f0 50%, #edf0f7 100%);
+    --theme-icon:   "☀️";
+}
+
+/* ── Theme Toggle ───────────────────────────────────── */
+.theme-toggle {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text-s);
+    font-size: 16px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+    padding: 0;
+    line-height: 1;
+}
+.theme-toggle:hover {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+/* ── Force light-theme overrides for Gradio internals ── */
+[data-theme="light"] .gradio-container {
+    background: var(--bg-base) !important;
+}
+[data-theme="light"] input,
+[data-theme="light"] textarea,
+[data-theme="light"] select {
+    background: var(--bg-panel) !important;
+    color: var(--text-p) !important;
+    border-color: var(--border) !important;
+}
+[data-theme="light"] .chatbot {
+    background: var(--bg-panel) !important;
+}
+[data-theme="light"] button.primary {
+    background: var(--accent) !important;
+}
+[data-theme="light"] label span {
+    color: var(--text-s) !important;
 }
 
 @font-face {
@@ -182,7 +250,7 @@ custom_css = """
 
 /* ── Header ──────────────────────────────────────────── */
 .main-header {
-    background: linear-gradient(135deg, #070c1a 0%, #0d1a33 50%, #111f3a 100%);
+    background: var(--header-bg);
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 20px 28px;
@@ -561,6 +629,7 @@ def _build_header_html(username: str, user_rank: str) -> str:
             <div class='sub'>9,000건 이상의 레거시 문서를 AI로 검색하고 분석합니다.</div>
         </div>
         <div class='hdr-right'>
+            <button class='theme-toggle' onclick='toggleTheme()' title='테마 전환'>🌙</button>
             <span class='rank-badge {rank_cls}'>{rank_label}</span>
             <span class='user-badge'>{username}</span>
         </div>
@@ -688,7 +757,33 @@ def build_gradio_ui():
         ["트위스트락 교체 이력을 알려줘"],
     ]
 
-    with gr.Blocks(css=custom_css, theme=gr.themes.Base()) as demo:
+    theme_js = """
+    function() {
+        // Theme toggle logic
+        window.toggleTheme = function() {
+            const root = document.documentElement;
+            const current = root.getAttribute('data-theme') || 'dark';
+            const next = current === 'dark' ? 'light' : 'dark';
+            root.setAttribute('data-theme', next);
+            localStorage.setItem('theme', next);
+            // Update toggle button icon
+            document.querySelectorAll('.theme-toggle').forEach(btn => {
+                btn.textContent = next === 'dark' ? '🌙' : '☀️';
+            });
+        };
+        // Apply saved theme on load
+        const saved = localStorage.getItem('theme') || 'dark';
+        document.documentElement.setAttribute('data-theme', saved);
+        // Sync button icons on load
+        setTimeout(() => {
+            document.querySelectorAll('.theme-toggle').forEach(btn => {
+                btn.textContent = saved === 'dark' ? '🌙' : '☀️';
+            });
+        }, 100);
+    }
+    """
+
+    with gr.Blocks(css=custom_css, js=theme_js, theme=gr.themes.Base()) as demo:
 
         user_rank_state = gr.State("low_rank")
         username_state = gr.State("")
@@ -704,6 +799,9 @@ def build_gradio_ui():
         with gr.Column(visible=True) as auth_view:
             gr.HTML("""<div class='auth-wrap'>
                 <div class='auth-header'>
+                    <div style='display:flex;justify-content:flex-end;margin-bottom:8px;'>
+                        <button class='theme-toggle' onclick='toggleTheme()' title='테마 전환'>🌙</button>
+                    </div>
                     <h2>Legacy Document Intelligence</h2>
                     <p>문서 검색 시스템에 로그인하세요.</p>
                 </div>
