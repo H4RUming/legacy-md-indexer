@@ -140,7 +140,8 @@ class RAGGenerator:
 
     def generate_stream(self, query: str, target_files: Union[List[str], List[Dict]],
                         search_query: str = None, catalog: Dict = None,
-                        params: Dict = None) -> Generator[Dict[str, Any], None, None]:
+                        params: Dict = None,
+                        chat_history: List[Dict] = None) -> Generator[Dict[str, Any], None, None]:
         if not target_files:
             yield {"answer": "조건에 부합하는 문서가 없어 답변할 수 없습니다.", "references": []}
             return
@@ -157,14 +158,25 @@ class RAGGenerator:
 
         context = self._load_context(bm25_targets, catalog=catalog)
         logger.info(f"Context loaded. Length: {len(context)} chars")
-        
+
+        # 대화 이력 구성 (최근 5턴까지)
+        history_block = ""
+        if chat_history:
+            recent = chat_history[-10:]  # user/assistant 쌍으로 최대 5턴
+            lines = []
+            for msg in recent:
+                role_label = "사용자" if msg["role"] == "user" else "시스템"
+                lines.append(f"{role_label}: {msg['content']}")
+            history_block = "\n[이전 대화]\n" + "\n".join(lines) + "\n"
+
         prompt = f"""다음 제공된 [Context] 문서들만 참고해서 [Query]에 대한 답변 작성.
 Context에 없는 내용은 지어내지 말고, "해당 내용은 문서에서 확인할 수 없습니다"라고 할 것.
+이전 대화가 있으면 맥락을 이어서 답변할 것. 사용자가 "다른건?", "더 없어?" 등 후속 질문을 하면 이전 대화 맥락을 참고할 것.
 설명은 간결하고 핵심만.
 
 [Context]
 {context}
-
+{history_block}
 [Query]
 {query}"""
 
