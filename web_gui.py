@@ -1,11 +1,7 @@
-"""
-Module: Web GUI
-Description:
-    - Gradio 5.x/6.x message format 대응
-    - 통합된 RAGGenerator(BM25 포함) 파이프라인 연결
-    - 실시간 스트리밍 및 인터랙션 로깅
-    - 질문 이력 (등급별 분리) 지원
-"""
+# 웹 GUI 모듈
+# - Gradio 5.x/6.x 메시지 포맷 대응
+# - RAGGenerator 통합 및 실시간 스트리밍
+# - 인터랙션 로깅, 등급별 질문 이력
 
 import os
 import hashlib
@@ -20,6 +16,7 @@ from pathlib import Path
 from agentic_router import AgenticRouter
 from rag_generator import RAGGenerator
 
+# 로거 설정
 logger = logging.getLogger("RAG_GUI")
 logger.setLevel(logging.INFO)
 ch = logging.StreamHandler()
@@ -30,7 +27,7 @@ LOG_FILE_PATH = Path("./interaction_logs.json")
 USERS_FILE = Path("./users.json")
 
 
-# ── User Management ──────────────────────────────────────────────────────────
+# 계정 관리
 def load_users():
     if not USERS_FILE.exists():
         return {}
@@ -69,9 +66,23 @@ def login_user(username, password):
     return True, f"{username}님 환영합니다.", users[username]["rank"]
 
 
-# ── Query History ────────────────────────────────────────────────────────────
+# 텍스트 추출 (Gradio 5.x/6.x 메시지 포맷 대응)
+def _extract_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and 'text' in item:
+                parts.append(item['text'])
+            elif isinstance(item, str):
+                parts.append(item)
+        return ''.join(parts) if parts else str(content)
+    return str(content)
+
+
+# 질문 이력 조회
 def _load_history_html(user_rank: str, limit: int = 20) -> str:
-    """로그 파일에서 동일 등급 질문 이력을 HTML로 반환"""
     if not LOG_FILE_PATH.exists():
         return "<div class='history-empty'>아직 질문 이력이 없습니다.</div>"
     try:
@@ -80,7 +91,6 @@ def _load_history_html(user_rank: str, limit: int = 20) -> str:
     except Exception:
         return "<div class='history-empty'>이력을 불러올 수 없습니다.</div>"
 
-    # 동일 등급만 필터링 후 최신순 정렬
     filtered = [l for l in logs if l.get("user", {}).get("rank") == user_rank]
     filtered = filtered[-limit:][::-1]
 
@@ -91,7 +101,7 @@ def _load_history_html(user_rank: str, limit: int = 20) -> str:
     for entry in filtered:
         ts = entry.get("timestamp", "")
         user = entry.get("user", {}).get("username", "")
-        query = entry.get("query", {}).get("raw_input", "")
+        query = _extract_text(entry.get("query", {}).get("raw_input", ""))
         status = entry.get("status", "")
         total = entry.get("total_duration_s", 0)
         doc_cnt = entry.get("stage1_routing", {}).get("filtered_files_count", 0)
@@ -99,7 +109,6 @@ def _load_history_html(user_rank: str, limit: int = 20) -> str:
         status_cls = "done" if status == "COMPLETED" else "stopped"
         status_ico = "check-ico" if status == "COMPLETED" else "stop-ico"
 
-        # 질문 텍스트가 길면 자르기
         display_q = query if len(query) <= 50 else query[:47] + "..."
 
         html += f"""<div class='history-item {status_cls}'>
@@ -110,533 +119,464 @@ def _load_history_html(user_rank: str, limit: int = 20) -> str:
             <div class='history-query'>{display_q}</div>
             <div class='history-meta'>
                 <span class='{status_ico}'></span>
-                <span>{total:.1f}초 / {doc_cnt}건 검색</span>
+                <span>{total:.1f}s &middot; {doc_cnt}건 검색</span>
             </div>
         </div>"""
     html += "</div>"
     return html
 
 
-# ── CSS ──────────────────────────────────────────────────────────────────────
+# 전역 CSS (Clean Light Theme)
 custom_css = """
-:root, [data-theme="dark"] {
-    --bg-base:      #0a0f1e;
-    --bg-panel:     #111827;
-    --bg-card:      #1a2236;
-    --bg-card-h:    #1e2a42;
-    --border:       #1f2937;
-    --border-light: rgba(31,41,55,0.6);
-    --accent:       #3b82f6;
-    --accent-dim:   rgba(96,165,250,0.15);
-    --green:        #34d399;
-    --green-dim:    rgba(52,211,153,0.12);
-    --amber:        #fbbf24;
-    --amber-dim:    rgba(251,191,36,0.12);
-    --red:          #f87171;
-    --red-dim:      rgba(248,113,113,0.10);
-    --text-p:       #f1f5f9;
-    --text-s:       #94a3b8;
-    --text-m:       #64748b;
-    --radius:       10px;
-    --header-bg:    linear-gradient(135deg, #070c1a 0%, #0d1a33 50%, #111f3a 100%);
-    --theme-icon:   "🌙";
-}
-
-[data-theme="light"] {
-    --bg-base:      #f0f2f5;
+:root {
+    --bg-base:      #f8f9fa;
     --bg-panel:     #ffffff;
-    --bg-card:      #f8f9fb;
-    --bg-card-h:    #eef1f6;
-    --border:       #d1d5db;
-    --border-light: rgba(209,213,219,0.6);
-    --accent:       #2563eb;
-    --accent-dim:   rgba(37,99,235,0.10);
-    --green:        #059669;
-    --green-dim:    rgba(5,150,105,0.10);
-    --amber:        #d97706;
-    --amber-dim:    rgba(217,119,6,0.10);
-    --red:          #dc2626;
-    --red-dim:      rgba(220,38,38,0.08);
-    --text-p:       #111827;
-    --text-s:       #4b5563;
-    --text-m:       #6b7280;
-    --header-bg:    linear-gradient(135deg, #e8ecf4 0%, #dfe6f0 50%, #edf0f7 100%);
-    --theme-icon:   "☀️";
+    --bg-card:      #fdfdfe;
+    --bg-card-h:    #f1f3f5;
+    --border:       #e9ecef;
+    --border-light: rgba(233, 236, 239, 0.5);
+    --accent:       #3b82f6; /* 산뜻한 블루 */
+    --accent-hover: #2563eb;
+    --accent-dim:   rgba(59, 130, 246, 0.08);
+    --green:        #10b981;
+    --green-dim:    rgba(16, 185, 129, 0.08);
+    --amber:        #f59e0b;
+    --amber-dim:    rgba(245, 158, 11, 0.08);
+    --red:          #ef4444;
+    --red-dim:      rgba(239, 68, 68, 0.08);
+    --text-p:       #212529;
+    --text-s:       #495057;
+    --text-m:       #868e96;
+    --radius:       16px;
+    --radius-sm:    8px;
+    --radius-lg:    24px;
+    --shadow-sm:    0 2px 8px rgba(0,0,0,0.04);
+    --shadow-md:    0 8px 16px rgba(0,0,0,0.06);
+    --shadow-lg:    0 16px 32px rgba(0,0,0,0.08);
+    --font-xs:      clamp(0.65rem, 0.6rem + 0.25vw, 0.75rem);
+    --font-sm:      clamp(0.75rem, 0.7rem + 0.25vw, 0.8125rem);
+    --font-base:    clamp(0.8125rem, 0.75rem + 0.3vw, 0.875rem);
+    --font-md:      clamp(0.875rem, 0.8rem + 0.35vw, 0.9375rem);
+    --font-lg:      clamp(1.125rem, 1rem + 0.5vw, 1.25rem);
+    --font-xl:      clamp(1.25rem, 1.1rem + 0.6vw, 1.5rem);
+    --space-xs:     clamp(4px, 0.5vw, 8px);
+    --space-sm:     clamp(8px, 1vw, 12px);
+    --space-md:     clamp(12px, 1.5vw, 20px);
+    --space-lg:     clamp(20px, 2.5vw, 40px);
+    --space-xl:     clamp(28px, 3vw, 48px);
 }
 
-/* ── Theme Toggle ───────────────────────────────────── */
-.theme-toggle {
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    border: 1px solid var(--border);
-    background: var(--bg-card);
-    color: var(--text-s);
-    font-size: 16px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all 0.2s;
-    padding: 0;
-    line-height: 1;
-}
-.theme-toggle:hover {
-    background: var(--accent-dim);
-    border-color: var(--accent);
-    color: var(--accent);
-}
-
-/* ── Force light-theme overrides for Gradio internals ── */
-[data-theme="light"] .gradio-container {
+/* Base Overrides */
+.gradio-container, .contain, .app {
     background: var(--bg-base) !important;
+    color: var(--text-p) !important;
+    line-height: 1.6 !important;
 }
-[data-theme="light"] input,
-[data-theme="light"] textarea,
-[data-theme="light"] select {
+.block, .form, .panel {
+    background: var(--bg-panel) !important;
+    border-color: var(--border) !important;
+    box-shadow: var(--shadow-sm) !important;
+    border-radius: var(--radius) !important;
+}
+input, textarea, select {
     background: var(--bg-panel) !important;
     color: var(--text-p) !important;
-    border-color: var(--border) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-sm) !important;
+    font-size: var(--font-base) !important;
+    transition: all 0.2s ease !important;
 }
-[data-theme="light"] .chatbot {
+input:focus, textarea:focus {
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 0 3px var(--accent-dim) !important;
+    outline: none !important;
+}
+input::placeholder, textarea::placeholder {
+    color: var(--text-m) !important;
+}
+
+/* Chatbot */
+.chatbot, .chatbot .message-wrap, .chatbot .wrapper {
     background: var(--bg-panel) !important;
+    border-radius: var(--radius) !important;
+    border: none !important;
 }
-[data-theme="light"] button.primary {
+.chatbot .bot, .chatbot .message.bot {
+    background: var(--bg-card) !important;
+    color: var(--text-p) !important;
+    border-radius: var(--radius) !important;
+    padding: var(--space-sm) var(--space-md) !important;
+    font-size: var(--font-base) !important;
+    border: 1px solid var(--border) !important;
+}
+.chatbot .user, .chatbot .message.user {
     background: var(--accent) !important;
-}
-[data-theme="light"] label span {
-    color: var(--text-s) !important;
+    color: #ffffff !important;
+    border-radius: var(--radius) !important;
+    padding: var(--space-sm) var(--space-md) !important;
+    font-size: var(--font-base) !important;
 }
 
-@font-face {
-    font-family: 'NanumGothic';
-    src: url('file/NanumGothic.ttf') format('truetype');
+/* Buttons */
+button {
+    background: var(--bg-panel) !important;
+    color: var(--text-p) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-sm) !important;
+    font-weight: 500 !important;
+    transition: all 0.2s ease !important;
 }
-* { font-family: 'NanumGothic', 'Noto Sans KR', sans-serif !important; }
+button:hover {
+    border-color: var(--accent) !important;
+    color: var(--accent) !important;
+}
+button.primary, button[variant="primary"] {
+    background: var(--accent) !important;
+    color: #ffffff !important;
+    border-color: var(--accent) !important;
+}
+button.primary:hover, button[variant="primary"]:hover {
+    background: var(--accent-hover) !important;
+    color: #ffffff !important;
+}
+button.stop {
+    background: var(--red-dim) !important;
+    color: var(--red) !important;
+    border-color: rgba(239, 68, 68, 0.3) !important;
+}
 
-.gradio-container { max-width: 1440px !important; }
+/* Typography & Layout */
+@import url('https://fonts.googleapis.com/css2?family=Pretendard:wght@300;400;500;600;700&display=swap');
+* {
+    font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, sans-serif !important;
+}
+.gradio-container {
+    max-width: 96vw !important;
+    padding-left: var(--space-sm) !important;
+    padding-right: var(--space-sm) !important;
+}
 
-/* ── Auth Page ───────────────────────────────────────── */
+/* Auth Page */
 .auth-wrap {
-    max-width: 400px;
-    margin: 60px auto;
+    max-width: min(420px, 92vw);
+    margin: clamp(4vh, 8vh, 10vh) auto;
     background: var(--bg-panel);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 36px 32px 28px;
+    border-radius: var(--radius-lg);
+    padding: var(--space-xl) var(--space-lg);
+    box-shadow: var(--shadow-lg);
+    box-sizing: border-box;
 }
 .auth-header {
     text-align: center;
-    margin-bottom: 28px;
+    margin-bottom: var(--space-md);
 }
 .auth-header h2 {
     color: var(--text-p) !important;
-    font-size: 20px !important;
+    font-size: var(--font-xl) !important;
     font-weight: 700 !important;
-    margin: 0 0 6px 0 !important;
+    margin: 0 0 var(--space-xs) 0 !important;
+    letter-spacing: -0.5px;
     border: none !important;
 }
 .auth-header p {
     color: var(--text-m);
-    font-size: 12px;
+    font-size: var(--font-base);
     margin: 0;
 }
 .auth-msg {
     text-align: center;
-    font-size: 13px;
-    min-height: 20px;
-    margin-top: 6px;
+    font-size: var(--font-sm);
+    margin-top: var(--space-sm);
+    font-weight: 500;
 }
 
-/* ── Header ──────────────────────────────────────────── */
+/* 로그인 탭 디자인 다듬기 */
+.auth-wrap .tabs {
+    border: none !important;
+    background: transparent !important;
+}
+.auth-wrap .tab-nav {
+    border-bottom: 2px solid var(--border-light) !important;
+    margin-bottom: var(--space-md) !important;
+}
+.auth-wrap .tab-nav button {
+    font-weight: 600 !important;
+    font-size: var(--font-md) !important;
+    padding-bottom: var(--space-sm) !important;
+    color: var(--text-m) !important;
+    border: none !important;
+}
+.auth-wrap .tab-nav button.selected {
+    color: var(--accent) !important;
+    border-bottom: 2px solid var(--accent) !important;
+}
+
+/* Main Header */
 .main-header {
-    background: var(--header-bg);
+    background: var(--bg-panel);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 20px 28px;
-    margin-bottom: 14px;
+    padding: var(--space-md) var(--space-md);
+    margin-bottom: var(--space-md);
     display: flex;
     justify-content: space-between;
     align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-sm);
 }
-.main-header .hdr-left h1 {
-    margin: 0;
-    color: var(--text-p) !important;
-    font-size: 18px !important;
-    font-weight: 700 !important;
-    border-bottom: none !important;
-    letter-spacing: -0.3px;
-}
-.main-header .hdr-left .sub {
-    color: var(--text-m);
-    font-size: 11px;
-    margin-top: 3px;
-}
-.main-header .hdr-right {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-}
-.user-badge {
-    background: var(--accent-dim);
-    border: 1px solid rgba(96,165,250,0.25);
-    color: var(--accent);
-    font-size: 11px;
-    font-weight: 600;
-    padding: 4px 12px;
-    border-radius: 20px;
-}
-.rank-badge {
-    font-size: 10px;
-    font-weight: 600;
-    padding: 3px 10px;
-    border-radius: 20px;
-    letter-spacing: 0.4px;
-}
-.rank-badge.hi { background: var(--green-dim); color: var(--green); border: 1px solid rgba(52,211,153,0.25); }
-.rank-badge.lo { background: var(--amber-dim); color: var(--amber); border: 1px solid rgba(251,191,36,0.25); }
+.main-header .hdr-left h1 { margin: 0; font-size: var(--font-lg) !important; font-weight: 700 !important; color: var(--text-p) !important; }
+.main-header .hdr-left .sub { color: var(--text-m); font-size: var(--font-sm); margin-top: var(--space-xs); }
+.user-badge { background: var(--accent-dim); color: var(--accent); padding: var(--space-xs) var(--space-sm); border-radius: 20px; font-size: var(--font-sm); font-weight: 600; }
+.rank-badge { padding: var(--space-xs) var(--space-sm); border-radius: 20px; font-size: var(--font-xs); font-weight: 600; margin-right: var(--space-xs); }
+.rank-badge.hi { background: var(--green-dim); color: var(--green); }
+.rank-badge.lo { background: var(--amber-dim); color: var(--amber); }
 
-/* ── Status ──────────────────────────────────────────── */
+/* Status Bar */
 .status-bar {
     border: 1px solid var(--border);
-    border-left: 3px solid var(--border);
-    border-radius: 8px;
-    padding: 10px 14px;
-    margin-bottom: 10px;
+    border-radius: var(--radius-sm);
+    padding: var(--space-sm) var(--space-md);
+    margin-bottom: var(--space-sm);
     display: flex;
     align-items: center;
-    gap: 10px;
-    font-size: 12px;
-    color: var(--text-s);
+    font-size: var(--font-sm);
+    font-weight: 500;
     background: var(--bg-panel);
-    transition: border-left-color 0.3s;
 }
-.status-bar.idle    { border-left-color: var(--border); color: var(--text-m); }
-.status-bar.search  { border-left-color: var(--amber); }
-.status-bar.gen     { border-left-color: var(--green); }
-.status-bar.done    { border-left-color: var(--accent); }
-.status-bar.error   { border-left-color: var(--red); color: var(--red); }
+.status-bar.idle { color: var(--text-m); }
+.status-bar.search { background: var(--amber-dim); color: var(--text-p); border-left: 4px solid var(--amber); }
+.status-bar.gen { background: var(--green-dim); color: var(--text-p); border-left: 4px solid var(--green); }
+.status-bar.done { background: var(--accent-dim); color: var(--accent); border-left: 4px solid var(--accent); }
+.status-bar.error { background: var(--red-dim); color: var(--red); border-left: 4px solid var(--red); }
 
-.dot-pulse {
-    display: inline-flex; gap: 3px; margin-right: 2px;
-}
-.dot-pulse span {
-    width: 5px; height: 5px; border-radius: 50%;
-    background: var(--accent);
-    animation: pulse 1.2s ease-in-out infinite;
-}
-.dot-pulse span:nth-child(2) { animation-delay: 0.2s; }
-.dot-pulse span:nth-child(3) { animation-delay: 0.4s; }
-@keyframes pulse {
-    0%, 80%, 100% { opacity: 0.2; transform: scale(0.8); }
-    40% { opacity: 1; transform: scale(1.1); }
-}
-
-/* ── Right Panel ─────────────────────────────────────── */
+/* Right Panel Elements */
 .section-label {
-    font-size: 10px !important;
-    font-weight: 700 !important;
-    letter-spacing: 1px !important;
-    text-transform: uppercase !important;
-    color: var(--text-m) !important;
-    margin: 12px 0 8px 0 !important;
-    padding-bottom: 5px !important;
-    border-bottom: 1px solid var(--border) !important;
+    font-size: var(--font-xs) !important;
+    font-weight: 600 !important;
+    color: var(--text-s) !important;
+    margin: var(--space-md) 0 var(--space-sm) !important;
 }
-.section-label:first-child { margin-top: 0 !important; }
-
-/* ── Result Summary ──────────────────────────────────── */
-.summary-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
-    gap: 6px;
-    margin: 4px 0 8px;
-}
+.info-panel { background: var(--bg-base) !important; border: none !important; box-shadow: none !important; }
+.summary-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-sm); margin-bottom: var(--space-sm); }
 .summary-card {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 8px 4px;
-    text-align: center;
+    background: var(--bg-panel); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: var(--space-sm) var(--space-xs); text-align: center;
 }
-.summary-val {
-    font-size: 16px;
-    font-weight: 700;
-    color: var(--accent);
-    line-height: 1;
-}
-.summary-lbl {
-    font-size: 9px;
-    color: var(--text-m);
-    margin-top: 3px;
-}
+.summary-val { font-size: var(--font-lg); font-weight: 700; color: var(--accent); }
+.summary-lbl { font-size: var(--font-xs); color: var(--text-m); margin-top: var(--space-xs); }
+.info-row { display: flex; justify-content: space-between; padding: var(--space-xs) 0; font-size: var(--font-sm); color: var(--text-s); }
 
-.info-row {
-    display: flex;
-    justify-content: space-between;
-    padding: 4px 0;
-    border-bottom: 1px solid var(--border-light);
-    font-size: 11px;
-}
-.info-row:last-child { border-bottom: none; }
-.info-key { color: var(--text-m); }
-.info-val { color: var(--text-s); font-weight: 500; }
-
-/* ── Source Documents ────────────────────────────────── */
-.source-panel {
-    max-height: 260px;
-    overflow-y: auto;
-    scrollbar-width: thin;
-    scrollbar-color: var(--border) transparent;
-}
-.source-panel::-webkit-scrollbar { width: 3px; }
-.source-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-
+/* Source List */
+.source-panel { max-height: clamp(160px, 25vh, 300px); overflow-y: auto; }
 .source-item {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-left: 3px solid var(--accent);
-    border-radius: 5px;
-    padding: 7px 10px;
-    margin-bottom: 4px;
-    font-size: 11px;
-    color: var(--text-s);
-    word-break: break-all;
-    line-height: 1.5;
+    background: var(--bg-panel); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: var(--space-sm) var(--space-sm); margin-bottom: var(--space-xs);
+    font-size: var(--font-sm); color: var(--text-p);
 }
-.source-item:last-child { margin-bottom: 0; }
-.source-num { color: var(--accent); font-weight: 700; margin-right: 4px; }
-.source-score {
-    display: inline-block;
-    background: var(--accent-dim);
-    color: var(--accent);
-    font-size: 9px;
-    padding: 1px 5px;
-    border-radius: 3px;
-    margin-left: 4px;
+.source-num { color: var(--accent); font-weight: 600; margin-right: var(--space-xs); }
+.source-score { font-size: var(--font-xs); background: var(--bg-base); padding: 2px var(--space-xs); border-radius: 4px; margin-left: var(--space-xs); color: var(--text-m); }
+
+/* History List */
+.history-list { max-height: clamp(200px, 30vh, 400px); overflow-y: auto; }
+.history-item { background: var(--bg-panel); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: var(--space-sm); margin-bottom: var(--space-xs); }
+.history-top { display: flex; justify-content: space-between; margin-bottom: var(--space-xs); }
+.history-user { font-size: var(--font-xs); font-weight: 600; color: var(--accent); }
+.history-time { font-size: var(--font-xs); color: var(--text-m); }
+.history-query { font-size: var(--font-sm); color: var(--text-p); margin-bottom: var(--space-xs); }
+.history-meta { font-size: var(--font-xs); color: var(--text-m); }
+
+/* Example Chips */
+.example-row { display: flex; gap: var(--space-xs); flex-wrap: wrap; justify-content: center; padding: var(--space-xs) 0; }
+.example-row button {
+    background: var(--bg-card) !important; border: 1px solid var(--border) !important;
+    border-radius: 20px !important; padding: var(--space-xs) var(--space-sm) !important;
+    font-size: var(--font-sm) !important; color: var(--text-s) !important;
+    cursor: pointer !important; transition: all 0.2s ease !important; font-weight: 400 !important;
 }
-.source-empty {
-    color: var(--text-m);
-    text-align: center;
-    padding: 16px 0;
-    font-size: 12px;
+.example-row button:hover {
+    background: var(--accent-dim) !important; border-color: var(--accent) !important; color: var(--accent) !important;
 }
 
-/* ── Query History ───────────────────────────────────── */
-.history-list {
-    max-height: 340px;
-    overflow-y: auto;
-    scrollbar-width: thin;
-    scrollbar-color: var(--border) transparent;
+/* Session Radio Tabs */
+#session-radio { background: transparent !important; border: none !important; box-shadow: none !important; padding: 0 !important; }
+#session-radio .wrap { display: flex !important; gap: var(--space-xs) !important; flex-wrap: wrap !important; overflow-x: auto !important; }
+#session-radio label {
+    padding: var(--space-xs) var(--space-sm) !important; font-size: var(--font-sm) !important;
+    background: var(--bg-panel) !important; border: 1px solid var(--border) !important;
+    border-radius: 20px !important; cursor: pointer !important; color: var(--text-s) !important;
+    white-space: nowrap !important; transition: all 0.2s ease !important; font-weight: 500 !important;
 }
-.history-list::-webkit-scrollbar { width: 3px; }
-.history-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+#session-radio label.selected, #session-radio label:has(input:checked) {
+    background: var(--accent) !important; color: #fff !important; border-color: var(--accent) !important;
+}
+#session-radio input[type="radio"] { display: none !important; }
 
-.history-item {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 8px 10px;
-    margin-bottom: 5px;
-    cursor: default;
-    transition: background 0.15s;
-}
-.history-item:hover { background: var(--bg-card-h); }
-.history-item:last-child { margin-bottom: 0; }
+/* =================== RESPONSIVE BREAKPOINTS =================== */
 
-.history-top {
-    display: flex;
-    justify-content: space-between;
-    margin-bottom: 3px;
-}
-.history-user {
-    color: var(--accent);
-    font-size: 10px;
-    font-weight: 600;
-}
-.history-time {
-    color: var(--text-m);
-    font-size: 10px;
-}
-.history-query {
-    color: var(--text-p);
-    font-size: 12px;
-    font-weight: 500;
-    line-height: 1.4;
-    margin-bottom: 3px;
-}
-.history-meta {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 10px;
-    color: var(--text-m);
-}
-.check-ico::before { content: ""; color: var(--green); margin-right: 2px; }
-.stop-ico::before  { content: ""; color: var(--amber); margin-right: 2px; }
-
-.history-empty {
-    color: var(--text-m);
-    text-align: center;
-    padding: 24px 0;
-    font-size: 12px;
+/* Tablet: <= 1024px */
+@media (max-width: 1024px) {
+    .gradio-container {
+        max-width: 100% !important;
+        padding-left: 12px !important;
+        padding-right: 12px !important;
+    }
+    #info-panel-col {
+        min-width: 240px !important;
+    }
+    .main-header {
+        padding: 14px 16px;
+    }
+    .summary-grid {
+        gap: 8px;
+    }
 }
 
-/* ── Session Tab Bar ────────────────────────────────── */
-.session-bar {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-bottom: 10px;
-    padding: 6px 8px;
-    background: var(--bg-panel);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    overflow-x: auto;
-    scrollbar-width: thin;
-    scrollbar-color: var(--border) transparent;
-}
-.session-bar::-webkit-scrollbar { height: 3px; }
-.session-bar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+/* Mobile: <= 768px */
+@media (max-width: 768px) {
+    .gradio-container {
+        padding-left: 6px !important;
+        padding-right: 6px !important;
+    }
+    #main-content-row {
+        flex-direction: column !important;
+    }
+    #main-content-row > div {
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+        flex: 1 1 100% !important;
+    }
+    #chat-col { order: 1; }
+    #info-panel-col { order: 2; }
 
-.session-tab {
-    flex-shrink: 0;
-    padding: 5px 14px;
-    font-size: 11px;
-    font-weight: 500;
-    color: var(--text-m);
-    background: transparent;
-    border: 1px solid transparent;
-    border-radius: 6px;
-    cursor: pointer;
-    transition: all 0.15s;
-    max-width: 160px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    #session-row {
+        flex-wrap: wrap !important;
+    }
+    #session-row > div:first-child {
+        flex: 1 1 100% !important;
+        max-width: 100% !important;
+    }
+
+    .auth-wrap {
+        max-width: 100% !important;
+        margin: 3vh auto !important;
+        padding: 24px 16px !important;
+        border-radius: 12px;
+    }
+    .main-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 10px;
+        padding: 12px 14px;
+    }
+    .source-panel {
+        max-height: clamp(120px, 30vh, 240px);
+    }
+    .history-list {
+        max-height: clamp(150px, 30vh, 300px);
+    }
+    .summary-grid {
+        grid-template-columns: repeat(2, 1fr) !important;
+    }
+    #chat-col .chatbot {
+        height: calc(100vh - 280px) !important;
+        min-height: 250px !important;
+    }
 }
-.session-tab:hover { background: var(--bg-card); color: var(--text-s); }
-.session-tab.active {
-    background: var(--accent-dim);
-    border-color: rgba(96,165,250,0.25);
-    color: var(--accent);
-    font-weight: 600;
-}
-.session-tab .tab-close {
-    margin-left: 6px;
-    opacity: 0.4;
-    font-size: 10px;
-    cursor: pointer;
-}
-.session-tab .tab-close:hover { opacity: 1; color: var(--red); }
-.session-new-btn {
-    flex-shrink: 0;
-    width: 28px;
-    height: 28px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 6px;
-    border: 1px dashed var(--border);
-    color: var(--text-m);
-    font-size: 14px;
-    cursor: pointer;
-    transition: all 0.15s;
-    background: transparent;
-}
-.session-new-btn:hover {
-    border-color: var(--accent);
-    color: var(--accent);
-    background: var(--accent-dim);
+
+/* Small mobile: <= 480px */
+@media (max-width: 480px) {
+    .auth-wrap {
+        padding: 20px 12px !important;
+        margin: 2vh 4px !important;
+    }
+    .main-header .hdr-left h1 {
+        font-size: clamp(0.95rem, 4vw, 1.15rem) !important;
+    }
+    .user-badge, .rank-badge {
+        font-size: clamp(0.6rem, 2.5vw, 0.7rem);
+        padding: 4px 8px;
+    }
+    .session-tab {
+        padding: 6px 10px;
+        font-size: clamp(0.65rem, 2.8vw, 0.75rem);
+    }
+    .summary-grid {
+        grid-template-columns: 1fr !important;
+    }
 }
 """
 
 
-# ── Status HTML Helpers ──────────────────────────────────────────────────────
+# HTML 컴포넌트 렌더링
 def _status_idle() -> str:
-    return "<div class='status-bar idle'>질문을 입력하면 문서에서 답변을 찾아드립니다.</div>"
+    return "<div class='status-bar idle'>질문을 입력하면 문서를 검색합니다.</div>"
 
 def _status_searching() -> str:
-    return """<div class='status-bar search'>
-        <div class='dot-pulse'><span></span><span></span><span></span></div>
-        관련 문서를 검색하고 있습니다...
-    </div>"""
+    return "<div class='status-bar search'>관련 문서 검색 중...</div>"
 
 def _status_search_done(duration: float, count: int) -> str:
-    return f"""<div class='status-bar search' style='border-left-color:var(--green);'>
-        {count:,}건의 관련 문서를 찾았습니다. ({duration:.1f}초)
-    </div>"""
+    return f"<div class='status-bar gen'>{count:,}건 문서 발견 ({duration:.1f}s)</div>"
 
 def _status_generating() -> str:
-    return """<div class='status-bar gen'>
-        <div class='dot-pulse'><span></span><span></span><span></span></div>
-        답변을 생성하고 있습니다...
-    </div>"""
+    return "<div class='status-bar gen'>답변 생성 중...</div>"
 
 def _status_complete(route_dur: float, gen_dur: float) -> str:
     total = route_dur + gen_dur
-    return f"<div class='status-bar done'>답변 완료 (총 {total:.1f}초 소요)</div>"
+    return f"<div class='status-bar done'>답변 완료 (총 {total:.1f}s)</div>"
 
 def _status_error(msg: str) -> str:
-    return f"<div class='status-bar error'>오류가 발생했습니다: {msg}</div>"
+    return f"<div class='status-bar error'>오류: {msg}</div>"
 
-
-# ── Source HTML ──────────────────────────────────────────────────────────────
 def _build_source_html(sources: list) -> str:
     if not sources:
-        return "<div class='source-panel'><div class='source-empty'>참조 문서 없음</div></div>"
+        return "<div class='source-panel'><div style='color:var(--text-m); font-size:var(--font-sm);'>참조 문서 없음</div></div>"
     html = "<div class='source-panel'>"
     for idx, src in enumerate(sources, 1):
         fpath = src.get("file_path", src) if isinstance(src, dict) else str(src)
         score_val = src.get("score") if isinstance(src, dict) else None
-        # 파일명만 표시 (경로 간소화)
         display_name = Path(fpath).name if "/" in fpath else fpath
         score_html = f"<span class='source-score'>관련도 {score_val:.2f}</span>" if score_val is not None else ""
         html += f"<div class='source-item'><span class='source-num'>[{idx}]</span>{display_name}{score_html}</div>"
     html += "</div>"
     return html
 
-
-# ── Stats HTML ───────────────────────────────────────────────────────────────
 def _stats_empty() -> str:
-    return "<div class='source-empty'>질의 결과가 여기에 표시됩니다.</div>"
+    return "<div style='color:var(--text-m); font-size:var(--font-sm);'>결과 대기 중</div>"
 
 def _stats_html(route_dur: float, gen_dur: float, params: dict, doc_count: int) -> str:
     total = route_dur + gen_dur
-    years_str  = ", ".join(str(y) for y in params.get("years",  [])) or "전체 기간"
+    years_str  = ", ".join(str(y) for y in params.get("years",  [])) or "전체"
     months_str = ", ".join(f"{m}월" for m in params.get("months", [])) or "전체"
     search_q   = params.get("search_query", "-") or "-"
     return f"""
 <div class='summary-grid'>
   <div class='summary-card'><div class='summary-val'>{doc_count:,}</div><div class='summary-lbl'>검색 문서</div></div>
-  <div class='summary-card'><div class='summary-val'>{gen_dur:.1f}s</div><div class='summary-lbl'>답변 생성</div></div>
+  <div class='summary-card'><div class='summary-val'>{gen_dur:.1f}s</div><div class='summary-lbl'>생성 시간</div></div>
   <div class='summary-card'><div class='summary-val'>{total:.1f}s</div><div class='summary-lbl'>총 소요</div></div>
 </div>
-<div class='section-label'>검색 조건</div>
-<div class='info-row'><span class='info-key'>기간</span><span class='info-val'>{years_str}</span></div>
-<div class='info-row'><span class='info-key'>월</span><span class='info-val'>{months_str}</span></div>
-<div class='info-row'><span class='info-key'>검색어</span><span class='info-val'>{search_q}</span></div>
+<div class='info-row'><span>대상 연도</span><span>{years_str}</span></div>
+<div class='info-row'><span>대상 월</span><span>{months_str}</span></div>
+<div class='info-row'><span>검색어</span><span>{search_q}</span></div>
 """
 
-
-# ── Header HTML ──────────────────────────────────────────────────────────────
 def _build_header_html(username: str, user_rank: str) -> str:
     rank_cls = "hi" if user_rank == "hi_rank" else "lo"
     rank_label = "전체 열람" if user_rank == "hi_rank" else "일반 열람"
     return f"""<div class='main-header'>
         <div class='hdr-left'>
             <h1>Legacy Document Intelligence</h1>
-            <div class='sub'>9,000건 이상의 레거시 문서를 AI로 검색하고 분석합니다.</div>
+            <div class='sub'>AI 기반 레거시 문서 검색 시스템</div>
         </div>
-        <div class='hdr-right'>
-            <button class='theme-toggle' onclick='toggleTheme()' title='테마 전환'>🌙</button>
+        <div>
             <span class='rank-badge {rank_cls}'>{rank_label}</span>
             <span class='user-badge'>{username}</span>
         </div>
     </div>"""
 
 
-# ── Integrated RAG Engine ────────────────────────────────────────────────────
+# 통합 RAG 엔진
 class IntegratedRAGEngine:
     def __init__(self):
         self.ready = False
@@ -644,10 +584,7 @@ class IntegratedRAGEngine:
         catalog_path = Path("./file_catalog.json")
 
         if not catalog_path.exists():
-            self.init_error = (
-                "file_catalog.json 파일이 없습니다. "
-                "먼저 md_catalog_builder.py를 실행하여 카탈로그를 생성하세요."
-            )
+            self.init_error = "카탈로그 누락: md_catalog_builder.py 실행 필요"
             logger.error(self.init_error)
             return
 
@@ -655,10 +592,10 @@ class IntegratedRAGEngine:
             self.router = AgenticRouter(catalog_path=str(catalog_path))
             self.generator = RAGGenerator(target_dir="./processed_md")
             self._init_log_file()
-            logger.info("RAG Engine init success")
+            logger.info("RAG 엔진 초기화 완료")
             self.ready = True
         except Exception as e:
-            self.init_error = f"엔진 초기화 실패: {e}"
+            self.init_error = f"초기화 실패: {e}"
             logger.error(self.init_error)
 
     def _init_log_file(self):
@@ -678,10 +615,7 @@ class IntegratedRAGEngine:
             logs.append({
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "status": status,
-                "user": {
-                    "username": username,
-                    "rank": user_rank,
-                },
+                "user": {"username": username, "rank": user_rank},
                 "query": {
                     "raw_input": query,
                     "extracted_parameters": {
@@ -693,21 +627,19 @@ class IntegratedRAGEngine:
                 "stage1_routing": {
                     "duration_s": round(route_duration, 3),
                     "filtered_files_count": len(filtered_files),
-                    "filtered_files": filtered_files,
                 },
                 "stage2_generation": {
                     "duration_s": round(gen_duration, 3),
                     "bm25_references": bm25_references,
-                    "answer": answer,
                 },
                 "total_duration_s": round(route_duration + gen_duration, 3),
             })
 
             with open(LOG_FILE_PATH, 'w', encoding='utf-8') as f:
                 json.dump(logs, f, ensure_ascii=False, indent=2)
-            logger.info("Interaction logged")
+            logger.info("인터랙션 로그 저장 완료")
         except Exception as e:
-            logger.error(f"Log write fail: {e}")
+            logger.error(f"로그 저장 실패: {e}")
 
     def route_query(self, query: str, user_rank: str = "hi_rank"):
         start_t = time.time()
@@ -715,218 +647,139 @@ class IntegratedRAGEngine:
         return route_res, time.time() - start_t
 
 
-# ── Session Helpers ──────────────────────────────────────────────────────────
+# 세션 유틸리티
 def _new_session_id():
     return uuid.uuid4().hex[:8]
 
 def _make_sessions_init():
-    """초기 세션 데이터 생성"""
     sid = _new_session_id()
     return {sid: {"name": "새 대화", "messages": []}}, sid
 
-def _build_session_bar_html(sessions: dict, active_id: str) -> str:
-    """세션 탭 바 HTML 렌더링"""
-    html = "<div class='session-bar'>"
-    for sid, sdata in sessions.items():
-        active_cls = " active" if sid == active_id else ""
-        name = sdata.get("name", "대화")
-        if len(name) > 18:
-            name = name[:16] + "..."
-        html += f"<div class='session-tab{active_cls}' data-sid='{sid}'>{name}</div>"
-    html += "</div>"
-    return html
-
 def _session_display_name(messages: list) -> str:
-    """첫 번째 사용자 메시지로 세션 이름 자동 생성"""
     for msg in messages:
         if msg.get("role") == "user":
-            q = msg["content"]
-            return q if len(q) <= 20 else q[:18] + "..."
+            q = _extract_text(msg["content"])
+            return q if len(q) <= 15 else q[:13] + "..."
     return "새 대화"
 
 
-# ── Gradio UI ────────────────────────────────────────────────────────────────
+# UI 빌드 영역
 def build_gradio_ui():
     engine = IntegratedRAGEngine()
 
     example_queries = [
-        ["2024년 이동장비 주요 정비 내역 요약"],
-        ["최근 2년간 엘리베이터 수리 내역"],
-        ["교체가 잦은 부품들의 리스트를 보여주세요"],
-        ["24년 예방정비 실적"],
-        ["트위스트락 교체 이력을 알려줘"],
+        "2024년 이동장비 주요 정비 내역 요약",
+        "최근 2년간 엘리베이터 수리 내역",
+        "교체가 잦은 부품 리스트",
     ]
 
-    theme_js = """
-    function() {
-        // Theme toggle logic
-        window.toggleTheme = function() {
-            const root = document.documentElement;
-            const current = root.getAttribute('data-theme') || 'dark';
-            const next = current === 'dark' ? 'light' : 'dark';
-            root.setAttribute('data-theme', next);
-            localStorage.setItem('theme', next);
-            // Update toggle button icon
-            document.querySelectorAll('.theme-toggle').forEach(btn => {
-                btn.textContent = next === 'dark' ? '🌙' : '☀️';
-            });
-        };
-        // Apply saved theme on load
-        const saved = localStorage.getItem('theme') || 'dark';
-        document.documentElement.setAttribute('data-theme', saved);
-        // Sync button icons on load
-        setTimeout(() => {
-            document.querySelectorAll('.theme-toggle').forEach(btn => {
-                btn.textContent = saved === 'dark' ? '🌙' : '☀️';
-            });
-        }, 100);
-    }
-    """
-
-    with gr.Blocks(css=custom_css, js=theme_js, theme=gr.themes.Base()) as demo:
+    with gr.Blocks(css=custom_css, fill_height=True, theme=gr.themes.Default(
+        primary_hue="blue",
+        neutral_hue="slate",
+        font=["Pretendard", "sans-serif"]
+    )) as demo:
 
         user_rank_state = gr.State("low_rank")
         username_state = gr.State("")
 
-        # ── Session State ────────────────────────────────────────────────
         init_sessions, init_active = _make_sessions_init()
-        sessions_state = gr.State(init_sessions)       # {sid: {name, messages}}
-        active_session_state = gr.State(init_active)    # current session id
+        sessions_state = gr.State(init_sessions)
+        active_session_state = gr.State(init_active)
 
-        # ════════════════════════════════════════════════════════════════════
-        # AUTH VIEW
-        # ════════════════════════════════════════════════════════════════════
+        # 로그인 화면
         with gr.Column(visible=True) as auth_view:
-            gr.HTML("""<div class='auth-wrap'>
-                <div class='auth-header'>
-                    <div style='display:flex;justify-content:flex-end;margin-bottom:8px;'>
-                        <button class='theme-toggle' onclick='toggleTheme()' title='테마 전환'>🌙</button>
-                    </div>
-                    <h2>Legacy Document Intelligence</h2>
-                    <p>문서 검색 시스템에 로그인하세요.</p>
-                </div>
-            </div>""")
-
             with gr.Column(elem_classes="auth-wrap"):
-                with gr.Tab("로그인"):
-                    login_user_input = gr.Textbox(label="아이디", placeholder="아이디를 입력하세요")
-                    login_pw_input = gr.Textbox(label="비밀번호", type="password", placeholder="비밀번호를 입력하세요")
-                    login_btn = gr.Button("로그인", variant="primary")
-                    login_msg = gr.HTML("<div class='auth-msg'></div>")
+                gr.HTML("""
+                    <div class='auth-header'>
+                        <h2>문서 검색 시스템</h2>
+                        <p>계정 정보를 입력하여 시작하세요.</p>
+                    </div>
+                """)
 
-                with gr.Tab("회원가입"):
-                    reg_user_input = gr.Textbox(label="아이디", placeholder="사용할 아이디")
-                    reg_pw_input = gr.Textbox(label="비밀번호", type="password", placeholder="비밀번호 설정")
-                    reg_rank_input = gr.Radio(
-                        ["일반 열람 (low_rank)", "전체 열람 (hi_rank)"],
-                        label="열람 권한", value="일반 열람 (low_rank)"
-                    )
-                    reg_btn = gr.Button("회원가입")
-                    reg_msg = gr.HTML("<div class='auth-msg'></div>")
+                with gr.Tabs():
+                    with gr.Tab("로그인"):
+                        login_user_input = gr.Textbox(label="아이디", placeholder="아이디 입력")
+                        login_pw_input = gr.Textbox(label="비밀번호", type="password", placeholder="비밀번호 입력")
+                        login_btn = gr.Button("로그인", variant="primary")
+                        login_msg = gr.HTML("<div class='auth-msg'></div>")
 
-        # ════════════════════════════════════════════════════════════════════
-        # MAIN VIEW
-        # ════════════════════════════════════════════════════════════════════
-        with gr.Column(visible=False) as main_view:
+                    with gr.Tab("회원가입"):
+                        reg_user_input = gr.Textbox(label="아이디", placeholder="사용할 아이디")
+                        reg_pw_input = gr.Textbox(label="비밀번호", type="password", placeholder="비밀번호 설정")
+                        reg_rank_input = gr.Radio(["일반 열람 (low_rank)", "전체 열람 (hi_rank)"], label="권한", value="일반 열람 (low_rank)")
+                        reg_btn = gr.Button("회원가입")
+                        reg_msg = gr.HTML("<div class='auth-msg'></div>")
+
+        # 메인 화면
+        with gr.Column(visible=False, elem_id="main-view") as main_view:
             header_display = gr.HTML("")
 
-            # ── 세션 탭 바 ────────────────────────────────────────────────
-            with gr.Row():
+            with gr.Row(elem_id="session-row"):
                 with gr.Column(scale=8):
-                    session_bar_display = gr.HTML(
-                        value=_build_session_bar_html(init_sessions, init_active)
+                    session_radio = gr.Radio(
+                        choices=[(v["name"], k) for k, v in init_sessions.items()],
+                        value=init_active, label="", container=False,
+                        elem_id="session-radio", interactive=True
                     )
-                with gr.Column(scale=1, min_width=60):
-                    new_session_btn = gr.Button("+ 새 대화", size="sm", variant="secondary")
-                with gr.Column(scale=1, min_width=60):
+                with gr.Column(scale=1, min_width=50):
+                    new_session_btn = gr.Button("+ 새 대화", size="sm")
+                with gr.Column(scale=1, min_width=50):
                     del_session_btn = gr.Button("삭제", size="sm", variant="stop")
 
-            # ── 세션 선택 드롭다운 (탭 전환용) ────────────────────────────
-            session_dropdown = gr.Dropdown(
-                choices=[(v["name"], k) for k, v in init_sessions.items()],
-                value=init_active,
-                label="대화 세션",
-                interactive=True,
-                container=False,
-            )
-
-            with gr.Row():
-                # ── 좌측: 채팅 ────────────────────────────────────────────
-                with gr.Column(scale=7):
+            with gr.Row(elem_id="main-content-row"):
+                with gr.Column(scale=7, elem_id="chat-col"):
                     chatbot = gr.Chatbot(
-                        height=500, show_label=False,
-                        placeholder="질문을 입력하면 AI가 문서를 검색하여 답변합니다."
+                        height="calc(100vh - 320px)", show_label=False,
+                        placeholder="<div style='text-align:center;color:var(--text-m);padding:40px 20px;'>"
+                                    "<div style='font-size:var(--font-lg);font-weight:600;margin-bottom:8px;'>무엇을 검색할까요?</div>"
+                                    "<div style='font-size:var(--font-sm);'>아래 예시를 클릭하거나 직접 질문을 입력하세요.</div></div>"
                     )
+                    with gr.Row(elem_classes="example-row"):
+                        ex_btns = [gr.Button(q, size="sm") for q in example_queries]
                     with gr.Row():
-                        msg_input = gr.Textbox(
-                            show_label=False,
-                            placeholder="질문을 입력하세요 (예: 2024년 엘리베이터 정비 내역)",
-                            container=False,
-                            scale=7,
-                        )
+                        msg_input = gr.Textbox(show_label=False, placeholder="질문 입력...", container=False, scale=7)
                         submit_btn = gr.Button("검색", variant="primary", scale=1)
-                        stop_btn   = gr.Button("중지", variant="stop", scale=1, interactive=True)
+                        stop_btn   = gr.Button("중지", variant="stop", scale=1)
 
-                    gr.Examples(examples=example_queries, inputs=msg_input, label="자주 묻는 질문")
-
-                # ── 우측: 정보 패널 ───────────────────────────────────────
-                with gr.Column(scale=3):
+                with gr.Column(scale=3, elem_id="info-panel-col", elem_classes="info-panel"):
                     status_display = gr.HTML(value=_status_idle())
 
-                    gr.HTML("<div class='section-label'>처리 결과</div>")
+                    gr.HTML("<div class='section-label'>검색 결과 요약</div>")
                     stats_display = gr.HTML(value=_stats_empty())
 
-                    gr.HTML("<div class='section-label'>참조 문서</div>")
-                    source_display = gr.HTML(
-                        value="<div class='source-panel'><div class='source-empty'>질의 실행 시 결과가 표시됩니다.</div></div>"
-                    )
+                    gr.HTML("<div class='section-label'>참조 문서 목록</div>")
+                    source_display = gr.HTML(value="<div class='source-panel'>대기 중...</div>")
 
                     gr.HTML("<div class='section-label'>최근 질문 이력</div>")
-                    history_display = gr.HTML(
-                        value="<div class='history-empty'>로그인 후 표시됩니다.</div>"
-                    )
+                    history_display = gr.HTML(value="<div class='history-empty'>대기 중...</div>")
 
-        # ── State ────────────────────────────────────────────────────────
+        # 상태 관리
         msg_query_state = gr.State()
         route_res_state = gr.State()
         route_dur_state = gr.State()
 
-        # ── Helper: dropdown choices 갱신 ────────────────────────────────
-        def _dropdown_choices(sessions):
+        def _radio_choices(sessions):
             return [(v["name"], k) for k, v in sessions.items()]
 
-        # ── Event Functions ──────────────────────────────────────────────
+        # 이벤트
         def do_login(user, pw):
             success, msg, rank = login_user(user, pw)
             if success:
                 header = _build_header_html(user, rank)
                 history = _load_history_html(rank)
-                # 로그인 시 새 세션으로 초기화
                 sessions, active = _make_sessions_init()
-                bar_html = _build_session_bar_html(sessions, active)
-                return (gr.update(visible=False), gr.update(visible=True),
-                        rank, user,
+                return (gr.update(visible=False), gr.update(visible=True), rank, user,
                         f"<div class='auth-msg' style='color:var(--green);'>{msg}</div>",
-                        header, history,
-                        sessions, active, bar_html,
-                        gr.update(choices=_dropdown_choices(sessions), value=active),
-                        [])
-            return (gr.update(visible=True), gr.update(visible=False),
-                    "low_rank", "",
+                        header, history, sessions, active,
+                        gr.update(choices=_radio_choices(sessions), value=active), [])
+            return (gr.update(visible=True), gr.update(visible=False), "low_rank", "",
                     f"<div class='auth-msg' style='color:var(--red);'>{msg}</div>",
-                    "", "<div class='history-empty'>로그인 후 표시됩니다.</div>",
-                    gr.update(), gr.update(), gr.update(),
-                    gr.update(),
-                    gr.update())
+                    "", "", gr.update(), gr.update(), gr.update(), gr.update())
 
-        login_btn.click(
-            do_login,
-            inputs=[login_user_input, login_pw_input],
-            outputs=[auth_view, main_view, user_rank_state, username_state,
-                     login_msg, header_display, history_display,
-                     sessions_state, active_session_state, session_bar_display,
-                     session_dropdown, chatbot]
-        )
+        login_btn.click(do_login, inputs=[login_user_input, login_pw_input],
+                        outputs=[auth_view, main_view, user_rank_state, username_state, login_msg,
+                                 header_display, history_display, sessions_state, active_session_state,
+                                 session_radio, chatbot])
 
         def do_register(user, pw, rank_label):
             rank = "hi_rank" if "hi_rank" in rank_label else "low_rank"
@@ -934,86 +787,51 @@ def build_gradio_ui():
             color = "var(--green)" if "완료" in msg else "var(--red)"
             return f"<div class='auth-msg' style='color:{color};'>{msg}</div>"
 
-        reg_btn.click(
-            do_register,
-            inputs=[reg_user_input, reg_pw_input, reg_rank_input],
-            outputs=[reg_msg]
-        )
+        reg_btn.click(do_register, inputs=[reg_user_input, reg_pw_input, reg_rank_input], outputs=[reg_msg])
 
-        # ── Session: 새 대화 ─────────────────────────────────────────────
         def create_new_session(sessions, active_id, current_chat):
-            # 현재 세션 저장
             if active_id in sessions:
                 sessions[active_id]["messages"] = current_chat or []
                 sessions[active_id]["name"] = _session_display_name(current_chat or [])
-            # 새 세션 생성
             new_id = _new_session_id()
             sessions[new_id] = {"name": "새 대화", "messages": []}
-            bar_html = _build_session_bar_html(sessions, new_id)
             return (sessions, new_id, [],
-                    bar_html,
-                    gr.update(choices=_dropdown_choices(sessions), value=new_id),
-                    _status_idle(), _stats_empty(),
-                    "<div class='source-panel'><div class='source-empty'>질의 실행 시 결과가 표시됩니다.</div></div>")
+                    gr.update(choices=_radio_choices(sessions), value=new_id),
+                    _status_idle(), _stats_empty(), "<div class='source-panel'>대기 중...</div>")
 
-        new_session_btn.click(
-            create_new_session,
-            inputs=[sessions_state, active_session_state, chatbot],
-            outputs=[sessions_state, active_session_state, chatbot,
-                     session_bar_display, session_dropdown,
-                     status_display, stats_display, source_display]
-        )
+        new_session_btn.click(create_new_session, inputs=[sessions_state, active_session_state, chatbot],
+                              outputs=[sessions_state, active_session_state, chatbot, session_radio,
+                                       status_display, stats_display, source_display])
 
-        # ── Session: 삭제 ────────────────────────────────────────────────
         def delete_current_session(sessions, active_id):
             if len(sessions) <= 1:
-                # 마지막 세션이면 초기화만
-                new_sessions, new_active = _make_sessions_init()
-                bar_html = _build_session_bar_html(new_sessions, new_active)
-                return (new_sessions, new_active, [],
-                        bar_html,
-                        gr.update(choices=_dropdown_choices(new_sessions), value=new_active),
-                        _status_idle(), _stats_empty(),
-                        "<div class='source-panel'><div class='source-empty'>질의 실행 시 결과가 표시됩니다.</div></div>")
-            # 삭제 후 인접 세션으로 전환
+                ns, na = _make_sessions_init()
+                return (ns, na, [],
+                        gr.update(choices=_radio_choices(ns), value=na),
+                        _status_idle(), _stats_empty(), "<div class='source-panel'>대기 중...</div>")
             sessions.pop(active_id, None)
             new_active = list(sessions.keys())[-1]
             new_chat = sessions[new_active].get("messages", [])
-            bar_html = _build_session_bar_html(sessions, new_active)
             return (sessions, new_active, new_chat,
-                    bar_html,
-                    gr.update(choices=_dropdown_choices(sessions), value=new_active),
-                    _status_idle(), _stats_empty(),
-                    "<div class='source-panel'><div class='source-empty'>질의 실행 시 결과가 표시됩니다.</div></div>")
+                    gr.update(choices=_radio_choices(sessions), value=new_active),
+                    _status_idle(), _stats_empty(), "<div class='source-panel'>대기 중...</div>")
 
-        del_session_btn.click(
-            delete_current_session,
-            inputs=[sessions_state, active_session_state],
-            outputs=[sessions_state, active_session_state, chatbot,
-                     session_bar_display, session_dropdown,
-                     status_display, stats_display, source_display]
-        )
+        del_session_btn.click(delete_current_session, inputs=[sessions_state, active_session_state],
+                              outputs=[sessions_state, active_session_state, chatbot, session_radio,
+                                       status_display, stats_display, source_display])
 
-        # ── Session: 드롭다운으로 전환 ───────────────────────────────────
         def switch_session(selected_id, sessions, active_id, current_chat):
             if selected_id == active_id:
                 return gr.update(), sessions, active_id, gr.update()
-            # 현재 세션 저장
             if active_id in sessions:
                 sessions[active_id]["messages"] = current_chat or []
                 sessions[active_id]["name"] = _session_display_name(current_chat or [])
-            # 선택 세션 로드
             new_chat = sessions.get(selected_id, {}).get("messages", [])
-            bar_html = _build_session_bar_html(sessions, selected_id)
-            return (new_chat, sessions, selected_id, bar_html)
+            return new_chat, sessions, selected_id, gr.update(choices=_radio_choices(sessions), value=selected_id)
 
-        session_dropdown.change(
-            switch_session,
-            inputs=[session_dropdown, sessions_state, active_session_state, chatbot],
-            outputs=[chatbot, sessions_state, active_session_state, session_bar_display]
-        )
+        session_radio.change(switch_session, inputs=[session_radio, sessions_state, active_session_state, chatbot],
+                             outputs=[chatbot, sessions_state, active_session_state, session_radio])
 
-        # ── Chat Event Functions ─────────────────────────────────────────
         def user_interaction(user_message, history):
             history = history or []
             history.append({"role": "user", "content": user_message})
@@ -1023,169 +841,93 @@ def build_gradio_ui():
             if not history or history[-1]["role"] != "user":
                 yield history, _status_idle(), {}, 0, ""
                 return
-
             if not engine.ready:
-                history.append({"role": "assistant", "content": "시스템을 사용할 수 없습니다. 관리자에게 문의하세요."})
-                yield history, _status_error("시스템 초기화 실패"), {}, 0, ""
+                history.append({"role": "assistant", "content": "시스템 오류: 관리자 문의 필요"})
+                yield history, _status_error("엔진 미초기화"), {}, 0, ""
                 return
 
-            query = history[-1]["content"]
-            history.append({"role": "assistant", "content": "관련 문서를 검색하고 있습니다..."})
-
+            query = _extract_text(history[-1]["content"])
+            history.append({"role": "assistant", "content": "문서 검색 중..."})
             yield history, _status_searching(), {}, 0, query
 
-            route_res, route_duration = engine.route_query(query, user_rank)
-            target_count = len(route_res.get("target_files", []))
-            yield history, _status_search_done(route_duration, target_count), route_res, route_duration, query
+            route_res, route_dur = engine.route_query(query, user_rank)
+            yield history, _status_search_done(route_dur, len(route_res.get("target_files", []))), route_res, route_dur, query
 
-        def bot_interaction_generate(history, route_res, route_duration, query,
-                                     username, user_rank,
-                                     sessions, active_id):
+        def bot_interaction_generate(history, route_res, route_duration, query, username, user_rank, sessions, active_id):
             if not history or history[-1]["role"] != "assistant":
-                yield (history, _build_source_html([]), _stats_empty(),
-                       _status_idle(), gr.update(), sessions, active_id,
-                       gr.update(), gr.update())
+                yield history, _build_source_html([]), _stats_empty(), _status_idle(), gr.update(), sessions, active_id, gr.update()
                 return
 
-            # 현재 세션의 이전 대화를 chat_history로 전달 (마지막 진행중 메시지 제외)
-            chat_history = [m for m in history[:-1] if m.get("content") and
-                           m["content"] != "관련 문서를 검색하고 있습니다..."]
-
+            chat_hist = [m for m in history[:-1] if m.get("content") and "검색 중" not in m["content"]]
             start_gen_t = time.time()
-            full_answer = ""
+            full_ans = ""
             sources = []
-            search_q = route_res.get("search_query", query)
 
-            yield (history, _build_source_html([]), _stats_empty(),
-                   _status_generating(), gr.update(), sessions, active_id,
-                   gr.update(), gr.update())
+            yield history, _build_source_html([]), _stats_empty(), _status_generating(), gr.update(), sessions, active_id, gr.update()
 
             try:
-                for rag_chunk in engine.generator.generate_stream(
-                    query, route_res["target_files"], search_query=search_q,
-                    catalog=engine.router.catalog,
-                    params=route_res.get("parameters", {}),
-                    chat_history=chat_history,
+                for chunk in engine.generator.generate_stream(
+                    query, route_res["target_files"], search_query=route_res.get("search_query", query),
+                    catalog=engine.router.catalog, params=route_res.get("parameters", {}), chat_history=chat_hist
                 ):
-                    full_answer = rag_chunk["answer"]
-                    sources = rag_chunk["references"]
-                    history[-1]["content"] = full_answer
-                    yield (history, _build_source_html(sources), _stats_empty(),
-                           _status_generating(), gr.update(), sessions, active_id,
-                           gr.update(), gr.update())
+                    full_ans = chunk["answer"]
+                    sources = chunk["references"]
+                    history[-1]["content"] = full_ans
+                    yield history, _build_source_html(sources), _stats_empty(), _status_generating(), gr.update(), sessions, active_id, gr.update()
 
                 gen_dur = time.time() - start_gen_t
-                final_stats = _stats_html(route_duration, gen_dur,
-                                          route_res.get("parameters", {}),
-                                          len(route_res.get("target_files", [])))
-                final_status = _status_complete(route_duration, gen_dur)
-
                 engine._log_interaction(
-                    username=username, user_rank=user_rank, query=query,
-                    params=route_res.get("parameters", {}),
-                    filtered_files=route_res.get("target_files", []),
-                    bm25_references=sources, answer=full_answer,
-                    route_duration=route_duration, gen_duration=gen_dur,
-                    status="COMPLETED"
+                    username=username, user_rank=user_rank, query=query, params=route_res.get("parameters", {}),
+                    filtered_files=route_res.get("target_files", []), bm25_references=sources, answer=full_ans,
+                    route_duration=route_duration, gen_duration=gen_dur, status="COMPLETED"
                 )
 
-                # 세션에 대화 저장 + 세션명 자동 갱신
                 if active_id in sessions:
                     sessions[active_id]["messages"] = history
                     sessions[active_id]["name"] = _session_display_name(history)
-                bar_html = _build_session_bar_html(sessions, active_id)
-                dd_update = gr.update(choices=_dropdown_choices(sessions), value=active_id)
 
-                updated_history = _load_history_html(user_rank)
-                yield (history, _build_source_html(sources), final_stats,
-                       final_status, updated_history, sessions, active_id,
-                       bar_html, dd_update)
+                yield (history, _build_source_html(sources), _stats_html(route_duration, gen_dur, route_res.get("parameters", {}), len(route_res.get("target_files", []))),
+                       _status_complete(route_duration, gen_dur), _load_history_html(user_rank), sessions, active_id,
+                       gr.update(choices=_radio_choices(sessions), value=active_id))
 
             except Exception as e:
-                logger.warning(f"Inference stopped or error: {e}")
-                history[-1]["content"] = full_answer + "\n\n[출력이 중단되었습니다.]"
-                gen_dur = time.time() - start_gen_t
-
+                logger.warning(f"추론 중단/오류 발생: {e}")
+                history[-1]["content"] = full_ans + "\n\n[출력 중단됨]"
                 engine._log_interaction(
-                    username=username, user_rank=user_rank, query=query,
-                    params=route_res.get("parameters", {}),
-                    filtered_files=route_res.get("target_files", []),
-                    bm25_references=sources, answer=history[-1]["content"],
-                    route_duration=route_duration, gen_duration=gen_dur,
-                    status="STOPPED"
+                    username=username, user_rank=user_rank, query=query, params=route_res.get("parameters", {}),
+                    filtered_files=route_res.get("target_files", []), bm25_references=sources, answer=history[-1]["content"],
+                    route_duration=route_duration, gen_duration=time.time() - start_gen_t, status="STOPPED"
                 )
-
                 if active_id in sessions:
                     sessions[active_id]["messages"] = history
                     sessions[active_id]["name"] = _session_display_name(history)
-                bar_html = _build_session_bar_html(sessions, active_id)
-                dd_update = gr.update(choices=_dropdown_choices(sessions), value=active_id)
 
-                updated_history = _load_history_html(user_rank)
-                yield (history, _build_source_html(sources), _stats_empty(),
-                       _status_error(str(e)), updated_history, sessions, active_id,
-                       bar_html, dd_update)
+                yield (history, _build_source_html(sources), _stats_empty(), _status_error(str(e)), _load_history_html(user_rank),
+                       sessions, active_id, gr.update(choices=_radio_choices(sessions), value=active_id))
 
-        # ── Event Chain ──────────────────────────────────────────────────
-        _gen_inputs = [chatbot, route_res_state, route_dur_state, msg_query_state,
-                       username_state, user_rank_state,
-                       sessions_state, active_session_state]
-        _gen_outputs = [chatbot, source_display, stats_display, status_display,
-                        history_display, sessions_state, active_session_state,
-                        session_bar_display, session_dropdown]
+        _inputs = [chatbot, route_res_state, route_dur_state, msg_query_state, username_state, user_rank_state, sessions_state, active_session_state]
+        _outputs = [chatbot, source_display, stats_display, status_display, history_display, sessions_state, active_session_state, session_radio]
 
-        submit_event = (
-            submit_btn.click(
-                user_interaction,
-                [msg_input, chatbot],
-                [msg_input, chatbot],
-                queue=False,
-            )
-            .then(
-                bot_interaction_route,
-                [chatbot, user_rank_state],
-                [chatbot, status_display, route_res_state, route_dur_state, msg_query_state],
-                queue=True,
-                show_progress="hidden",
-            )
-            .then(
-                bot_interaction_generate,
-                _gen_inputs,
-                _gen_outputs,
-                queue=True,
-                show_progress="hidden",
-            )
-        )
+        submit_ev = submit_btn.click(user_interaction, [msg_input, chatbot], [msg_input, chatbot], queue=False)\
+            .then(bot_interaction_route, [chatbot, user_rank_state], [chatbot, status_display, route_res_state, route_dur_state, msg_query_state], queue=True)\
+            .then(bot_interaction_generate, _inputs, _outputs, queue=True)
 
-        input_event = (
-            msg_input.submit(
-                user_interaction,
-                [msg_input, chatbot],
-                [msg_input, chatbot],
-                queue=False,
-            )
-            .then(
-                bot_interaction_route,
-                [chatbot, user_rank_state],
-                [chatbot, status_display, route_res_state, route_dur_state, msg_query_state],
-                queue=True,
-                show_progress="hidden",
-            )
-            .then(
-                bot_interaction_generate,
-                _gen_inputs,
-                _gen_outputs,
-                queue=True,
-                show_progress="hidden",
-            )
-        )
+        input_ev = msg_input.submit(user_interaction, [msg_input, chatbot], [msg_input, chatbot], queue=False)\
+            .then(bot_interaction_route, [chatbot, user_rank_state], [chatbot, status_display, route_res_state, route_dur_state, msg_query_state], queue=True)\
+            .then(bot_interaction_generate, _inputs, _outputs, queue=True)
 
-        stop_btn.click(fn=None, inputs=None, outputs=None, cancels=[submit_event, input_event])
+        ex_evs = []
+        for btn in ex_btns:
+            ev = btn.click(user_interaction, [btn, chatbot], [msg_input, chatbot], queue=False)\
+                .then(bot_interaction_route, [chatbot, user_rank_state], [chatbot, status_display, route_res_state, route_dur_state, msg_query_state], queue=True)\
+                .then(bot_interaction_generate, _inputs, _outputs, queue=True)
+            ex_evs.append(ev)
+
+        stop_btn.click(fn=None, inputs=None, outputs=None, cancels=[submit_ev, input_ev] + ex_evs)
 
     return demo
 
-
 if __name__ == "__main__":
-    logger.info("Starting Web Server")
+    logger.info("웹 서버 시작")
     app = build_gradio_ui()
     app.launch(server_name="0.0.0.0", server_port=7860, share=True, allowed_paths=["."])
