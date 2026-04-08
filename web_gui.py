@@ -511,7 +511,7 @@ button.stop {
 
 # HTML 컴포넌트 렌더링
 def _status_idle() -> str:
-    return "<div class='status-bar idle'>질문을 입력하면 문서를 검색합니다.</div>"
+    return "<div class='status-bar idle'>질문을 입력하면 문서 검색이 시작됩니다.</div>"
 
 def _status_searching() -> str:
     return "<div class='status-bar search'>관련 문서 검색 중...</div>"
@@ -543,7 +543,7 @@ def _build_source_html(sources: list) -> str:
     return html
 
 def _stats_empty() -> str:
-    return "<div style='color:var(--text-m); font-size:var(--font-sm);'>결과 대기 중</div>"
+    return "<div style='color:var(--text-m); font-size:var(--font-sm);'>질문을 입력하면 결과가 표시됩니다.</div>"
 
 def _stats_html(route_dur: float, gen_dur: float, params: dict, doc_count: int) -> str:
     total = route_dur + gen_dur
@@ -728,8 +728,15 @@ def build_gradio_ui():
 
             with gr.Row(elem_id="main-content-row"):
                 with gr.Column(scale=7, elem_id="chat-col"):
+                    gr.HTML("""<div style='background:var(--amber-dim); border:1px solid rgba(245,158,11,0.25);
+                        border-radius:var(--radius-sm); padding:var(--space-sm) var(--space-md);
+                        font-size:var(--font-sm); color:var(--text-s); display:flex; align-items:center; gap:var(--space-sm);'>
+                        <span style='font-size:1.1em;'>⚠</span>
+                        <span>본 시스템은 <strong>프로토타입</strong>으로 불안정할 수 있습니다.
+                        질의 후 답변까지 약 <strong>1~2분</strong> 소요됩니다.</span>
+                    </div>""")
                     chatbot = gr.Chatbot(
-                        height="calc(100vh - 320px)", show_label=False,
+                        height="calc(100vh - 360px)", show_label=False,
                         placeholder="<div style='text-align:center;color:var(--text-m);padding:40px 20px;'>"
                                     "<div style='font-size:var(--font-lg);font-weight:600;margin-bottom:8px;'>무엇을 검색할까요?</div>"
                                     "<div style='font-size:var(--font-sm);'>아래 예시를 클릭하거나 직접 질문을 입력하세요.</div></div>"
@@ -748,10 +755,10 @@ def build_gradio_ui():
                     stats_display = gr.HTML(value=_stats_empty())
 
                     gr.HTML("<div class='section-label'>참조 문서 목록</div>")
-                    source_display = gr.HTML(value="<div class='source-panel'>대기 중...</div>")
+                    source_display = gr.HTML(value="<div class='source-panel'><div style='color:var(--text-m); font-size:var(--font-sm);'>질문을 입력하면 참조 문서가 표시됩니다.</div></div>")
 
                     gr.HTML("<div class='section-label'>최근 질문 이력</div>")
-                    history_display = gr.HTML(value="<div class='history-empty'>대기 중...</div>")
+                    history_display = gr.HTML(value="<div class='history-empty'>질문을 입력하면 이력이 표시됩니다.</div>")
 
         # 상태 관리
         msg_query_state = gr.State()
@@ -797,7 +804,7 @@ def build_gradio_ui():
             sessions[new_id] = {"name": "새 대화", "messages": []}
             return (sessions, new_id, [],
                     gr.update(choices=_radio_choices(sessions), value=new_id),
-                    _status_idle(), _stats_empty(), "<div class='source-panel'>대기 중...</div>")
+                    _status_idle(), _stats_empty(), "<div class='source-panel'><div style='color:var(--text-m); font-size:var(--font-sm);'>질문을 입력하면 참조 문서가 표시됩니다.</div></div>")
 
         new_session_btn.click(create_new_session, inputs=[sessions_state, active_session_state, chatbot],
                               outputs=[sessions_state, active_session_state, chatbot, session_radio,
@@ -808,13 +815,13 @@ def build_gradio_ui():
                 ns, na = _make_sessions_init()
                 return (ns, na, [],
                         gr.update(choices=_radio_choices(ns), value=na),
-                        _status_idle(), _stats_empty(), "<div class='source-panel'>대기 중...</div>")
+                        _status_idle(), _stats_empty(), "<div class='source-panel'><div style='color:var(--text-m); font-size:var(--font-sm);'>질문을 입력하면 참조 문서가 표시됩니다.</div></div>")
             sessions.pop(active_id, None)
             new_active = list(sessions.keys())[-1]
             new_chat = sessions[new_active].get("messages", [])
             return (sessions, new_active, new_chat,
                     gr.update(choices=_radio_choices(sessions), value=new_active),
-                    _status_idle(), _stats_empty(), "<div class='source-panel'>대기 중...</div>")
+                    _status_idle(), _stats_empty(), "<div class='source-panel'><div style='color:var(--text-m); font-size:var(--font-sm);'>질문을 입력하면 참조 문서가 표시됩니다.</div></div>")
 
         del_session_btn.click(delete_current_session, inputs=[sessions_state, active_session_state],
                               outputs=[sessions_state, active_session_state, chatbot, session_radio,
@@ -916,14 +923,10 @@ def build_gradio_ui():
             .then(bot_interaction_route, [chatbot, user_rank_state], [chatbot, status_display, route_res_state, route_dur_state, msg_query_state], queue=True)\
             .then(bot_interaction_generate, _inputs, _outputs, queue=True)
 
-        ex_evs = []
         for btn in ex_btns:
-            ev = btn.click(user_interaction, [btn, chatbot], [msg_input, chatbot], queue=False)\
-                .then(bot_interaction_route, [chatbot, user_rank_state], [chatbot, status_display, route_res_state, route_dur_state, msg_query_state], queue=True)\
-                .then(bot_interaction_generate, _inputs, _outputs, queue=True)
-            ex_evs.append(ev)
+            btn.click(fn=lambda q: q, inputs=[btn], outputs=[msg_input], queue=False)
 
-        stop_btn.click(fn=None, inputs=None, outputs=None, cancels=[submit_ev, input_ev] + ex_evs)
+        stop_btn.click(fn=None, inputs=None, outputs=None, cancels=[submit_ev, input_ev])
 
     return demo
 
