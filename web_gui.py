@@ -668,9 +668,9 @@ def build_gradio_ui():
     engine = IntegratedRAGEngine()
 
     example_queries = [
-        "2024년 이동장비 주요 정비 내역 요약",
-        "최근 2년간 엘리베이터 수리 내역",
-        "교체가 잦은 부품 리스트",
+        "2024년 이동장비 주요 정비 내역 자세히 알려줘",
+        "교체가 잦은 부품들의 리스트를 보여주세요",
+        "원가 구조 요약",
     ]
 
     with gr.Blocks(css=custom_css, fill_height=True, theme=gr.themes.Default(
@@ -696,19 +696,19 @@ def build_gradio_ui():
                     </div>
                 """)
 
-                with gr.Tabs():
-                    with gr.Tab("로그인"):
-                        login_user_input = gr.Textbox(label="아이디", placeholder="아이디 입력")
-                        login_pw_input = gr.Textbox(label="비밀번호", type="password", placeholder="비밀번호 입력")
-                        login_btn = gr.Button("로그인", variant="primary")
-                        login_msg = gr.HTML("<div class='auth-msg'></div>")
+                # with gr.Tabs():
+                #     with gr.Tab("로그인"):
+                login_user_input = gr.Textbox(label="아이디", placeholder="아이디 입력")
+                login_pw_input = gr.Textbox(label="비밀번호", type="password", placeholder="비밀번호 입력")
+                login_btn = gr.Button("로그인", variant="primary")
+                login_msg = gr.HTML("<div class='auth-msg'></div>")
 
-                    with gr.Tab("회원가입"):
-                        reg_user_input = gr.Textbox(label="아이디", placeholder="사용할 아이디")
-                        reg_pw_input = gr.Textbox(label="비밀번호", type="password", placeholder="비밀번호 설정")
-                        reg_rank_input = gr.Radio(["일반 열람 (low_rank)", "전체 열람 (hi_rank)"], label="권한", value="일반 열람 (low_rank)")
-                        reg_btn = gr.Button("회원가입")
-                        reg_msg = gr.HTML("<div class='auth-msg'></div>")
+                    # with gr.Tab("회원가입"):
+                    #     reg_user_input = gr.Textbox(label="아이디", placeholder="사용할 아이디")
+                    #     reg_pw_input = gr.Textbox(label="비밀번호", type="password", placeholder="비밀번호 설정")
+                    #     reg_rank_input = gr.Radio(["일반 열람 (low_rank)", "전체 열람 (hi_rank)"], label="권한", value="일반 열람 (low_rank)")
+                    #     reg_btn = gr.Button("회원가입")
+                    #     reg_msg = gr.HTML("<div class='auth-msg'></div>")
 
         # 메인 화면
         with gr.Column(visible=False, elem_id="main-view") as main_view:
@@ -781,13 +781,13 @@ def build_gradio_ui():
                                  header_display, history_display, sessions_state, active_session_state,
                                  session_radio, chatbot])
 
-        def do_register(user, pw, rank_label):
-            rank = "hi_rank" if "hi_rank" in rank_label else "low_rank"
-            msg = register_user(user, pw, rank)
-            color = "var(--green)" if "완료" in msg else "var(--red)"
-            return f"<div class='auth-msg' style='color:{color};'>{msg}</div>"
+        # def do_register(user, pw, rank_label):
+        #     rank = "hi_rank" if "hi_rank" in rank_label else "low_rank"
+        #     msg = register_user(user, pw, rank)
+        #     color = "var(--green)" if "완료" in msg else "var(--red)"
+        #     return f"<div class='auth-msg' style='color:{color};'>{msg}</div>"
 
-        reg_btn.click(do_register, inputs=[reg_user_input, reg_pw_input, reg_rank_input], outputs=[reg_msg])
+        # reg_btn.click(do_register, inputs=[reg_user_input, reg_pw_input, reg_rank_input], outputs=[reg_msg])
 
         def create_new_session(sessions, active_id, current_chat):
             if active_id in sessions:
