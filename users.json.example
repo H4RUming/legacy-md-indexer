@@ -1,0 +1,7 @@
+{
+  "_comment": "password는 SHA-256 해시값 (hashlib.sha256)",
+  "(user_name)": {
+    "password": "(password)",
+    "rank": "(rank)"
+  }
+}
