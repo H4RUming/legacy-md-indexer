@@ -735,16 +735,26 @@ def build_gradio_ui():
                         <span>본 시스템은 <strong>프로토타입</strong>으로 불안정할 수 있습니다.
                         질의 후 답변까지 약 <strong>1~2분</strong> 소요됩니다.</span>
                     </div>""")
+                    _click_js = (
+                        'var el=document.querySelector("#msg-input textarea")'
+                        '||document.querySelector("#msg-input input");'
+                        'if(el){el.value=this.textContent.trim();'
+                        'el.dispatchEvent(new Event("input",{bubbles:true}));'
+                        'el.focus();}'
+                    )
+                    _chips = "".join(
+                        f"<button onclick='{_click_js}'>{q}</button>"
+                        for q in example_queries
+                    )
                     chatbot = gr.Chatbot(
-                        height="calc(100vh - 360px)", show_label=False,
+                        height="calc(100vh - 320px)", show_label=False,
                         placeholder="<div style='text-align:center;color:var(--text-m);padding:40px 20px;'>"
                                     "<div style='font-size:var(--font-lg);font-weight:600;margin-bottom:8px;'>무엇을 검색할까요?</div>"
-                                    "<div style='font-size:var(--font-sm);'>아래 예시를 클릭하거나 직접 질문을 입력하세요.</div></div>"
+                                    "<div style='font-size:var(--font-sm);margin-bottom:var(--space-md);'>예시를 클릭하거나 직접 질문을 입력하세요.</div>"
+                                    f"<div class='example-row'>{_chips}</div></div>"
                     )
-                    with gr.Row(elem_classes="example-row"):
-                        ex_btns = [gr.Button(q, size="sm") for q in example_queries]
                     with gr.Row():
-                        msg_input = gr.Textbox(show_label=False, placeholder="질문 입력...", container=False, scale=7)
+                        msg_input = gr.Textbox(show_label=False, placeholder="질문 입력...", container=False, scale=7, elem_id="msg-input")
                         submit_btn = gr.Button("검색", variant="primary", scale=1)
                         stop_btn   = gr.Button("중지", variant="stop", scale=1)
 
@@ -922,9 +932,6 @@ def build_gradio_ui():
         input_ev = msg_input.submit(user_interaction, [msg_input, chatbot], [msg_input, chatbot], queue=False)\
             .then(bot_interaction_route, [chatbot, user_rank_state], [chatbot, status_display, route_res_state, route_dur_state, msg_query_state], queue=True)\
             .then(bot_interaction_generate, _inputs, _outputs, queue=True)
-
-        for btn in ex_btns:
-            btn.click(fn=lambda q: q, inputs=[btn], outputs=[msg_input], queue=False)
 
         stop_btn.click(fn=None, inputs=None, outputs=None, cancels=[submit_ev, input_ev])
 
