@@ -673,7 +673,27 @@ def build_gradio_ui():
         "원가 구조 요약",
     ]
 
-    with gr.Blocks(css=custom_css, fill_height=True, theme=gr.themes.Default(
+    _page_js = """
+    () => {
+        document.addEventListener('click', (e) => {
+            const chip = e.target.closest('.example-chip');
+            if (!chip) return;
+            const ta = document.querySelector('#msg-input textarea')
+                    || document.querySelector('#msg-input input');
+            if (!ta) return;
+            const setter = Object.getOwnPropertyDescriptor(
+                HTMLTextAreaElement.prototype, 'value')?.set
+                || Object.getOwnPropertyDescriptor(
+                HTMLInputElement.prototype, 'value')?.set;
+            if (setter) setter.call(ta, chip.textContent.trim());
+            else ta.value = chip.textContent.trim();
+            ta.dispatchEvent(new Event('input', { bubbles: true }));
+            ta.focus();
+        });
+    }
+    """
+
+    with gr.Blocks(css=custom_css, js=_page_js, fill_height=True, theme=gr.themes.Default(
         primary_hue="blue",
         neutral_hue="slate",
         font=["Pretendard", "sans-serif"]
@@ -735,15 +755,8 @@ def build_gradio_ui():
                         <span>본 시스템은 <strong>프로토타입</strong>으로 불안정할 수 있습니다.
                         질의 후 답변까지 약 <strong>1~2분</strong> 소요됩니다.</span>
                     </div>""")
-                    _click_js = (
-                        'var el=document.querySelector("#msg-input textarea")'
-                        '||document.querySelector("#msg-input input");'
-                        'if(el){el.value=this.textContent.trim();'
-                        'el.dispatchEvent(new Event("input",{bubbles:true}));'
-                        'el.focus();}'
-                    )
                     _chips = "".join(
-                        f"<button onclick='{_click_js}'>{q}</button>"
+                        f"<button class='example-chip'>{q}</button>"
                         for q in example_queries
                     )
                     chatbot = gr.Chatbot(
