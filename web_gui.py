@@ -386,15 +386,23 @@ button.stop {
 .history-query { font-size: var(--font-sm); color: var(--text-p); margin-bottom: var(--space-xs); }
 .history-meta { font-size: var(--font-xs); color: var(--text-m); }
 
-/* Example Chips */
-.example-row { display: flex; gap: var(--space-xs); flex-wrap: wrap; justify-content: center; padding: var(--space-xs) 0; }
-.example-row button {
+/* Chatbot ↔ Example Row 시각 통합 */
+#main-chatbot { border-bottom-left-radius: 0 !important; border-bottom-right-radius: 0 !important; }
+#main-chatbot .wrapper, #main-chatbot .chatbot { border-bottom-left-radius: 0 !important; border-bottom-right-radius: 0 !important; }
+#example-row {
+    background: var(--bg-panel) !important; border: 1px solid var(--border) !important;
+    border-top: none !important; border-bottom-left-radius: var(--radius) !important;
+    border-bottom-right-radius: var(--radius) !important; margin-top: -1px !important;
+    padding: var(--space-sm) var(--space-md) !important; box-shadow: var(--shadow-sm) !important;
+    display: flex; gap: var(--space-xs); flex-wrap: wrap; justify-content: center;
+}
+#example-row button {
     background: var(--bg-card) !important; border: 1px solid var(--border) !important;
     border-radius: 20px !important; padding: var(--space-xs) var(--space-sm) !important;
     font-size: var(--font-sm) !important; color: var(--text-s) !important;
     cursor: pointer !important; transition: all 0.2s ease !important; font-weight: 400 !important;
 }
-.example-row button:hover {
+#example-row button:hover {
     background: var(--accent-dim) !important; border-color: var(--accent) !important; color: var(--accent) !important;
 }
 
@@ -673,27 +681,7 @@ def build_gradio_ui():
         "원가 구조 요약",
     ]
 
-    _page_js = """
-    () => {
-        document.addEventListener('click', (e) => {
-            const chip = e.target.closest('.example-chip');
-            if (!chip) return;
-            const ta = document.querySelector('#msg-input textarea')
-                    || document.querySelector('#msg-input input');
-            if (!ta) return;
-            const setter = Object.getOwnPropertyDescriptor(
-                HTMLTextAreaElement.prototype, 'value')?.set
-                || Object.getOwnPropertyDescriptor(
-                HTMLInputElement.prototype, 'value')?.set;
-            if (setter) setter.call(ta, chip.textContent.trim());
-            else ta.value = chip.textContent.trim();
-            ta.dispatchEvent(new Event('input', { bubbles: true }));
-            ta.focus();
-        });
-    }
-    """
-
-    with gr.Blocks(css=custom_css, js=_page_js, fill_height=True, theme=gr.themes.Default(
+    with gr.Blocks(css=custom_css, fill_height=True, theme=gr.themes.Default(
         primary_hue="blue",
         neutral_hue="slate",
         font=["Pretendard", "sans-serif"]
@@ -755,19 +743,17 @@ def build_gradio_ui():
                         <span>본 시스템은 <strong>프로토타입</strong>으로 불안정할 수 있습니다.
                         질의 후 답변까지 약 <strong>1~2분</strong> 소요됩니다.</span>
                     </div>""")
-                    _chips = "".join(
-                        f"<button class='example-chip'>{q}</button>"
-                        for q in example_queries
-                    )
                     chatbot = gr.Chatbot(
                         height="calc(100vh - 320px)", show_label=False,
+                        elem_id="main-chatbot",
                         placeholder="<div style='text-align:center;color:var(--text-m);padding:40px 20px;'>"
                                     "<div style='font-size:var(--font-lg);font-weight:600;margin-bottom:8px;'>무엇을 검색할까요?</div>"
-                                    "<div style='font-size:var(--font-sm);margin-bottom:var(--space-md);'>예시를 클릭하거나 직접 질문을 입력하세요.</div>"
-                                    f"<div class='example-row'>{_chips}</div></div>"
+                                    "<div style='font-size:var(--font-sm);'>예시를 클릭하거나 직접 질문을 입력하세요.</div></div>"
                     )
+                    with gr.Row(elem_classes="example-row", elem_id="example-row"):
+                        ex_btns = [gr.Button(q, size="sm") for q in example_queries]
                     with gr.Row():
-                        msg_input = gr.Textbox(show_label=False, placeholder="질문 입력...", container=False, scale=7, elem_id="msg-input")
+                        msg_input = gr.Textbox(show_label=False, placeholder="질문 입력...", container=False, scale=7)
                         submit_btn = gr.Button("검색", variant="primary", scale=1)
                         stop_btn   = gr.Button("중지", variant="stop", scale=1)
 
@@ -945,6 +931,9 @@ def build_gradio_ui():
         input_ev = msg_input.submit(user_interaction, [msg_input, chatbot], [msg_input, chatbot], queue=False)\
             .then(bot_interaction_route, [chatbot, user_rank_state], [chatbot, status_display, route_res_state, route_dur_state, msg_query_state], queue=True)\
             .then(bot_interaction_generate, _inputs, _outputs, queue=True)
+
+        for btn in ex_btns:
+            btn.click(fn=lambda q: q, inputs=[btn], outputs=[msg_input], queue=False)
 
         stop_btn.click(fn=None, inputs=None, outputs=None, cancels=[submit_ev, input_ev])
 
