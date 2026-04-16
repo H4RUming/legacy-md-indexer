@@ -26,9 +26,9 @@ class RAGGenerator:
         
         config = configparser.ConfigParser()
         config.read('setting.conf')
-        self.model_id = config['DEFAULT'].get('MODEL_ID', 'qwen2.5:14b')
-        self.api_url = config['DEFAULT'].get('OLLAMA_URL', 'http://localhost:11434/api/generate')
-        
+        self.model_id = config['DEFAULT'].get('MODEL_ID', 'gemma-4-31b-it')
+        self.api_url = config['DEFAULT'].get('API_URL', 'http://hai-server:8000/v1/completions')
+
         self.num_ctx = 131072
         self.req_timeout = 600
         self.max_char_limit = 160000 
