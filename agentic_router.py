@@ -25,7 +25,7 @@ class AgenticRouter:
         config = configparser.ConfigParser()
         config.read('setting.conf')
         self.model_id = config['DEFAULT'].get('MODEL_ID', 'qwen2.5:14b')
-        self.api_url = config['DEFAULT'].get('OLLAMA_URL', 'http://localhost:11434/api/generate')
+        self.api_url = config['DEFAULT'].get('API_URL', 'http://hai-server:8000/v1/completions')
 
     def _load_catalog(self) -> dict:
         if not self.catalog_path.exists():
