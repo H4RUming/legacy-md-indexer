@@ -1,7 +1,7 @@
 """
 Phase 3 RAG Generator (BM25 + Kiwi Tokenizer)
 - Kiwi 형태소 분석기 기반 BM25 본문 검색
-- Stream response 처리
+- Stream response 처리 (vLLM 호환)
 - Context Window(128k) 대응 및 사전 Truncate
 """
 import logging
@@ -27,16 +27,15 @@ class RAGGenerator:
         config = configparser.ConfigParser()
         config.read('setting.conf')
         self.model_id = config['DEFAULT'].get('MODEL_ID', 'gemma-4-31b-it')
-        self.api_url = config['DEFAULT'].get('API_URL', 'http://hai-server:8000/v1/completions')
+        # Chat completions 엔드포인트 사용
+        self.api_url = config['DEFAULT'].get('API_URL', 'http://hai-server:8000/v1/chat/completions')
 
-        self.num_ctx = 131072
         self.req_timeout = 600
         self.max_char_limit = 160000 
         
         self.top_k = 5
 
-        # 형태소 분석기 초기화
-        logger.info("Init Kiwi tokenizer")
+        logger.info("Kiwi 형태소 분석기 초기화")
         self.kiwi = Kiwi()
 
     def _tokenize(self, text: str) -> List[str]:
@@ -65,14 +64,14 @@ class RAGGenerator:
         if not docs:
             return []
 
-        logger.info(f"Calc BM25 scores for {len(docs)} docs")
+        logger.info(f"{len(docs)}개 문서 BM25 스코어 계산")
         tokenized_docs = [self._tokenize(doc) for doc in docs]
         bm25 = BM25Okapi(tokenized_docs)
 
         tokenized_query = self._tokenize(query)
         scores = bm25.get_scores(tokenized_query)
 
-        # 날짜 매칭 문서에 스코어 부스트 적용
+        # 날짜 매칭 문서 스코어 부스트
         if catalog and params:
             target_years = set(params.get("years") or [])
             target_months = set(params.get("months") or [])
@@ -86,7 +85,7 @@ class RAGGenerator:
                             scores[i] *= 1.3
                             break
 
-        # Sort desc
+        # desc 정렬
         top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:self.top_k]
 
         results = []
@@ -97,7 +96,7 @@ class RAGGenerator:
                     "score": round(float(scores[idx]), 4)
                 })
 
-        logger.info(f"BM25 retrieve done. Selected: {len(results)} ea")
+        logger.info(f"BM25 검색 완료. {len(results)}개 선택됨")
         return results
 
     def _load_context(self, target_files: List[Dict], catalog: Dict = None) -> str:
@@ -113,7 +112,7 @@ class RAGGenerator:
 
             text = fpath.read_text(encoding='utf-8')
 
-            # 날짜 메타 주입 (LLM이 시계열 맥락 인식)
+            # 시계열 인식을 위한 날짜 메타 주입
             date_str = ""
             if catalog:
                 meta = catalog.get(file_path, {})
@@ -130,7 +129,7 @@ class RAGGenerator:
                 allowed_len = self.max_char_limit - current_len
                 if allowed_len > 100:
                     context_blocks.append(block[:allowed_len] + "\n...[Truncated]...")
-                logger.warning(f"Context limit exceeded ({self.max_char_limit} chars). Truncating.")
+                logger.warning(f"Context 제한 초과 ({self.max_char_limit} chars). Truncating.")
                 break
             
             context_blocks.append(block)
@@ -157,12 +156,11 @@ class RAGGenerator:
             return
 
         context = self._load_context(bm25_targets, catalog=catalog)
-        logger.info(f"Context loaded. Length: {len(context)} chars")
+        logger.info(f"Context 로드 완료. Length: {len(context)} chars")
 
-        # 대화 이력 구성 (최근 5턴까지)
         history_block = ""
         if chat_history:
-            recent = chat_history[-10:]  # user/assistant 쌍으로 최대 5턴
+            recent = chat_history[-10:]
             lines = []
             for msg in recent:
                 role_label = "사용자" if msg["role"] == "user" else "시스템"
@@ -180,17 +178,15 @@ Context에 없는 내용은 지어내지 말고, "해당 내용은 문서에서 
 [Query]
 {query}"""
 
+        # vLLM (OpenAI 호환) 페이로드 구성
         payload = {
             "model": self.model_id,
-            "prompt": prompt,
+            "messages": [{"role": "user", "content": prompt}],
             "stream": True,
-            "options": {
-                "temperature": 0.6,
-                "num_ctx": self.num_ctx
-            }
+            "temperature": 0.6
         }
 
-        logger.info("Req stream inference")
+        logger.info("스트리밍 추론 요청")
         start_t = time.time()
         first_token_received = False
 
@@ -201,19 +197,37 @@ Context에 없는 내용은 지어내지 말고, "해당 내용은 문서에서 
                 full_answer = ""
                 for line in res.iter_lines():
                     if line:
-                        if not first_token_received:
-                            ttft = time.time() - start_t
-                            logger.info(f"TTFT: {ttft:.2f}s")
-                            first_token_received = True
+                        decoded = line.decode('utf-8').strip()
+                        
+                        if decoded.startswith("data:"):
+                            data_str = decoded[5:].strip()
+                            
+                            if data_str == "[DONE]":
+                                break
+                            if not data_str:
+                                continue
+                                
+                            try:
+                                chunk = json.loads(data_str)
+                                content = chunk['choices'][0]['delta'].get('content', '')
+                                
+                                if content:
+                                    if not first_token_received:
+                                        ttft = time.time() - start_t
+                                        logger.info(f"TTFT: {ttft:.2f}s")
+                                        first_token_received = True
 
-                        chunk = json.loads(line.decode('utf-8'))
-                        full_answer += chunk.get("response", "")
-                        
-                        yield {
-                            "answer": full_answer,
-                            "references": bm25_targets
-                        }
-                        
+                                    full_answer += content
+                                    yield {
+                                        "answer": full_answer,
+                                        "references": bm25_targets
+                                    }
+                            except json.JSONDecodeError:
+                                logger.debug(f"JSON Parse err: {data_str}")
+                                continue
+                            except KeyError:
+                                continue
+                                
         except requests.exceptions.RequestException as e:
             logger.error(f"API Error: {e}")
             yield {
